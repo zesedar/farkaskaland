@@ -34,6 +34,12 @@ STOP_START_FRAME = 44
 STOP_END_FRAME = 62
 ANIMATION_FRAME_TIME = 0.07
 
+# Ezek a fájlok kicsit zavaróak lassan lejátszva, ezért csak őket gyorsítjuk.
+# Fontos: ez fájlnév szerinti számozás, tehát wolf_run_0052.png - wolf_run_0059.png.
+FAST_STOP_FILE_START = 52
+FAST_STOP_FILE_END = 59
+FAST_STOP_FRAME_TIME = 0.002
+
 # A képeken a zöld háttér jelöli az átlátszó részeket.
 # Nem csak egyetlen pontos RGB-értéket kezel, hanem a zöldes árnyalatokat is.
 GREEN_ALPHA_MIN_GREEN = 70
@@ -120,6 +126,41 @@ def load_image_sequence(
     return frames
 
 
+def get_frame_index_from_timer(animation_timer: float, frame_times: list[float]) -> int:
+    """Visszaadja, hogy eltelt idő alapján melyik frame-et kell mutatni.
+
+    Ezt a megállás animációnál használjuk, mert ott egyes képkockák gyorsabbak.
+    """
+    elapsed = 0.0
+
+    for frame_index, frame_time in enumerate(frame_times):
+        elapsed += frame_time
+
+        if animation_timer < elapsed:
+            return frame_index
+
+    return len(frame_times) - 1
+
+
+def create_stop_frame_times() -> list[float]:
+    """Megállás animáció frame-idői.
+
+    A wolf_run_0052.png - wolf_run_0059.png fájlokat gyorsabban játsszuk le,
+    a többi megállás frame marad az eredeti tempón.
+    """
+    frame_times: list[float] = []
+
+    for logical_frame in range(STOP_START_FRAME, STOP_END_FRAME + 1):
+        file_number = logical_frame + 1
+
+        if FAST_STOP_FILE_START <= file_number <= FAST_STOP_FILE_END:
+            frame_times.append(FAST_STOP_FRAME_TIME)
+        else:
+            frame_times.append(ANIMATION_FRAME_TIME)
+
+    return frame_times
+
+
 def draw_static_background(screen: pygame.Surface) -> None:
     # Ég
     screen.fill((136, 207, 255))
@@ -182,6 +223,7 @@ class Player:
 
         # 44-62: megállás. Fájlnév szerint ez wolf_run_0045.png - wolf_run_0063.png.
         self.stop_frames = frames[STOP_START_FRAME : STOP_END_FRAME + 1]
+        self.stop_frame_times = create_stop_frame_times()
 
         self.x = 180.0
         self.y = float(GROUND_Y)
@@ -235,7 +277,7 @@ class Player:
             if self.animation_state == "stop":
                 self.animation_timer += dt
 
-                stop_duration = len(self.stop_frames) * ANIMATION_FRAME_TIME
+                stop_duration = sum(self.stop_frame_times)
                 if self.animation_timer >= stop_duration:
                     # A megállás animáció egyszer végigment, maradjon az utolsó frame-en.
                     self.animation_timer = stop_duration
@@ -250,8 +292,8 @@ class Player:
             image = self.run_frames[frame_index]
         elif self.animation_state == "stop":
             # 44-62: egyszer végigmegy, nem loopol.
-            frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME)
-            frame_index = min(frame_index, len(self.stop_frames) - 1)
+            # A wolf_run_0052.png - wolf_run_0059.png fájlok gyorsabban mennek át.
+            frame_index = get_frame_index_from_timer(self.animation_timer, self.stop_frame_times)
             image = self.stop_frames[frame_index]
         else:
             # Ha nincs input és a megállás animáció már lement, az utolsó megálló frame marad.
