@@ -37,7 +37,8 @@ MAX_FALL_SPEED = 1100
 JUMP_SHEET_FILENAME = "wolf_jump_sheet.png"
 JUMP_SHEET_COLUMNS = 4
 JUMP_SHEET_ROWS = 2
-JUMP_FRAME_TIME = 0.13
+JUMP_ASCEND_FRAME_TIME = 0.12
+JUMP_DESCEND_FRAME_TIME = 0.14
 
 # Külön képfájlok adatai
 # A képek legyenek itt: assets/
@@ -540,6 +541,11 @@ class Player:
         self.animation_state = "idle"
         self.animation_timer = 0.0
 
+        # Ugrás animáció két részre bontva: felfelé és lefelé.
+        # Így a sprite sheet második sora (esés/érkezés) biztosan látszik.
+        self.jump_phase = "up"
+        self.jump_phase_timer = 0.0
+
     def handle_input(self, dt: float, background: ScrollingBackground) -> None:
         keys = pygame.key.get_pressed()
 
@@ -563,6 +569,8 @@ class Player:
         if jump_pressed and not self.jump_pressed_last_frame and self.on_ground:
             self.vy = -JUMP_SPEED
             self.on_ground = False
+            self.jump_phase = "up"
+            self.jump_phase_timer = 0.0
             self.start_animation("jump")
 
         self.jump_pressed_last_frame = jump_pressed
@@ -601,11 +609,25 @@ class Player:
             self.animation_state = state
             self.animation_timer = 0.0
 
+    def set_jump_phase(self, phase: str) -> None:
+        """Az ugrás fázisváltásakor újraindítja a helyi jump animációs időzítőt."""
+        if self.jump_phase != phase:
+            self.jump_phase = phase
+            self.jump_phase_timer = 0.0
+
     def update_animation(self, dt: float) -> None:
         if not self.on_ground:
             # Levegőben mindig az ugrás animáció aktív.
+            # A sprite sheet első fele a felszállás, a második fele a lefelé jövő rész.
             self.start_animation("jump")
+
+            if self.vy < 0:
+                self.set_jump_phase("up")
+            else:
+                self.set_jump_phase("down")
+
             self.animation_timer += dt
+            self.jump_phase_timer += dt
             self.was_movement_pressed = self.movement_pressed
             return
 
@@ -636,14 +658,35 @@ class Player:
 
         self.was_movement_pressed = self.movement_pressed
 
+    def current_jump_image(self) -> pygame.Surface:
+        """Az ugrás képkockáját felfelé/lefelé fázis alapján választja ki."""
+        frame_count = len(self.jump_frames)
+
+        if frame_count <= 4:
+            frame_index = min(int(self.animation_timer / 0.13), frame_count - 1)
+            return self.jump_frames[frame_index]
+
+        ascend_count = frame_count // 2
+        descend_count = frame_count - ascend_count
+
+        if self.jump_phase == "up":
+            local_index = min(
+                int(self.jump_phase_timer / JUMP_ASCEND_FRAME_TIME),
+                ascend_count - 1,
+            )
+            frame_index = local_index
+        else:
+            local_index = min(
+                int(self.jump_phase_timer / JUMP_DESCEND_FRAME_TIME),
+                descend_count - 1,
+            )
+            frame_index = ascend_count + local_index
+
+        return self.jump_frames[frame_index]
+
     def current_image(self) -> pygame.Surface:
         if self.animation_state == "jump":
-            # Az ugrás animáció egyszer fut végig; ha még levegőben van, az utolsó frame marad.
-            frame_index = min(
-                int(self.animation_timer / JUMP_FRAME_TIME),
-                len(self.jump_frames) - 1,
-            )
-            image = self.jump_frames[frame_index]
+            image = self.current_jump_image()
         elif self.animation_state == "run":
             # 0-43: végigmegy, majd újraindul, amíg nyomva van a gomb.
             frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME) % len(self.run_frames)
