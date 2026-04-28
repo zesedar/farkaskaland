@@ -12,16 +12,29 @@ GROUND_Y = 430
 PLAYER_SPEED = 280
 SPRITE_HEIGHT = 120
 
-# Sprite sheet adatok
-# A kép legyen itt: assets/wolf_run_sheet.png
-# 4 oszlop, 3 sor, 256x256 px képkockák
-# Ezeket nem kell módosítani, ha a wolf_run_sheet.png tényleg 1024x768 px.
-RUN_SHEET_COLUMNS = 4
-RUN_SHEET_ROWS = 3
-RUN_FRAME_WIDTH = 256
-RUN_FRAME_HEIGHT = 256
+# Külön képfájlok adatai
+# A képek legyenek itt: assets/
+# Példa: assets/wolf_run_0001.png, assets/wolf_run_0002.png, ...
+# Logikai frame-ek:
+# 0-43: futás animáció
+# 44-62: megállás animáció
+# Mivel a fájlnevek 1-től indulnak:
+# 0. frame  -> wolf_run_0001.png
+# 43. frame -> wolf_run_0044.png
+# 44. frame -> wolf_run_0045.png
+# 62. frame -> wolf_run_0063.png
+FRAME_FILE_PREFIX = "wolf_run_"
+FRAME_FILE_EXTENSION = ".png"
+FRAME_FILE_DIGITS = 4
+TOTAL_FRAME_COUNT = 63
 
-# A sprite sheeten a zöld háttér jelöli az átlátszó részeket.
+RUN_START_FRAME = 0
+RUN_END_FRAME = 43
+STOP_START_FRAME = 44
+STOP_END_FRAME = 62
+ANIMATION_FRAME_TIME = 0.07
+
+# A képeken a zöld háttér jelöli az átlátszó részeket.
 # Nem csak egyetlen pontos RGB-értéket kezel, hanem a zöldes árnyalatokat is.
 GREEN_ALPHA_MIN_GREEN = 70
 GREEN_ALPHA_DOMINANCE = 28
@@ -59,45 +72,50 @@ def remove_green_transparency(surface: pygame.Surface) -> pygame.Surface:
     return surface
 
 
-def load_sprite_sheet(
-    path: Path,
-    frame_width: int,
-    frame_height: int,
-    columns: int,
-    rows: int,
+def load_frame_file(path: Path, target_height: int) -> pygame.Surface:
+    """Betölt egy frame-képet, eltávolítja a zöld hátteret, majd átméretezi."""
+    frame = pygame.image.load(str(path)).convert_alpha()
+
+    # Ezt még méretezés előtt csináljuk, hogy ne keletkezzen zöld szél a sprite körül.
+    frame = remove_green_transparency(frame)
+
+    scale = target_height / frame.get_height()
+    new_width = int(frame.get_width() * scale)
+    return pygame.transform.smoothscale(frame, (new_width, target_height))
+
+
+def load_image_sequence(
+    folder: Path,
+    prefix: str,
+    extension: str,
+    digits: int,
+    frame_count: int,
     target_height: int,
 ) -> list[pygame.Surface]:
-    sheet = pygame.image.load(str(path)).convert_alpha()
+    """Betölti a külön fájlokban lévő képkockákat 1-től számozva.
 
-    expected_width = frame_width * columns
-    expected_height = frame_height * rows
+    Példa frame_count=63 esetén:
+    wolf_run_0001.png ... wolf_run_0063.png
+    """
+    frames: list[pygame.Surface] = []
+    missing_files: list[str] = []
 
-    if sheet.get_width() != expected_width or sheet.get_height() != expected_height:
-        raise ValueError(
-            f"Hibás sprite sheet méret: {sheet.get_width()}x{sheet.get_height()} px. "
-            f"Elvárt méret: {expected_width}x{expected_height} px."
+    for file_number in range(1, frame_count + 1):
+        filename = f"{prefix}{file_number:0{digits}d}{extension}"
+        path = folder / filename
+
+        if not path.exists():
+            missing_files.append(filename)
+            continue
+
+        frames.append(load_frame_file(path, target_height))
+
+    if missing_files:
+        shown = ", ".join(missing_files[:8])
+        extra = "" if len(missing_files) <= 8 else f" ... +{len(missing_files) - 8} további"
+        raise FileNotFoundError(
+            f"Hiányzó animációs fájl(ok) az assets mappából: {shown}{extra}"
         )
-
-    frames = []
-
-    for row in range(rows):
-        for col in range(columns):
-            x = col * frame_width
-            y = row * frame_height
-
-            frame = sheet.subsurface(
-                pygame.Rect(x, y, frame_width, frame_height)
-            ).copy()
-
-            # A wolf_run_sheet.png-ben a zöld árnyalatok jelentik az átlátszóságot.
-            # Ezt még méretezés előtt csináljuk, hogy ne keletkezzen zöld szél a sprite körül.
-            frame = remove_green_transparency(frame)
-
-            scale = target_height / frame.get_height()
-            new_width = int(frame.get_width() * scale)
-            frame = pygame.transform.smoothscale(frame, (new_width, target_height))
-
-            frames.append(frame)
 
     return frames
 
@@ -143,19 +161,27 @@ class Player:
     def __init__(self) -> None:
         asset_dir = Path(__file__).parent / "assets"
 
-        self.run_frames = load_sprite_sheet(
-            asset_dir / "wolf_run_sheet.png",
-            frame_width=RUN_FRAME_WIDTH,
-            frame_height=RUN_FRAME_HEIGHT,
-            columns=RUN_SHEET_COLUMNS,
-            rows=RUN_SHEET_ROWS,
+        frames = load_image_sequence(
+            folder=asset_dir,
+            prefix=FRAME_FILE_PREFIX,
+            extension=FRAME_FILE_EXTENSION,
+            digits=FRAME_FILE_DIGITS,
+            frame_count=TOTAL_FRAME_COUNT,
             target_height=SPRITE_HEIGHT,
         )
 
-        # Álló helyzetnek az első képkockát használjuk.
-        self.idle_frames = [
-            self.run_frames[0],
-        ]
+        needed_frame_count = STOP_END_FRAME + 1
+        if len(frames) < needed_frame_count:
+            raise ValueError(
+                f"Csak {len(frames)} képkocka lett betöltve. "
+                f"Legalább {needed_frame_count} kell, mert a kód a 0-{STOP_END_FRAME} frame-eket használja."
+            )
+
+        # 0-43: futás. Fájlnév szerint ez wolf_run_0001.png - wolf_run_0044.png.
+        self.run_frames = frames[RUN_START_FRAME : RUN_END_FRAME + 1]
+
+        # 44-62: megállás. Fájlnév szerint ez wolf_run_0045.png - wolf_run_0063.png.
+        self.stop_frames = frames[STOP_START_FRAME : STOP_END_FRAME + 1]
 
         self.x = 180.0
         self.y = float(GROUND_Y)
@@ -163,14 +189,19 @@ class Player:
         self.vx = 0.0
         self.facing_right = True
 
-        self.run_timer = 0.0
-        self.idle_timer = 0.0
+        self.movement_pressed = False
+        self.was_movement_pressed = False
+
+        # Lehetséges állapotok: "idle", "run", "stop".
+        self.animation_state = "idle"
+        self.animation_timer = 0.0
 
     def handle_input(self, dt: float) -> None:
         keys = pygame.key.get_pressed()
 
         moving_left = keys[pygame.K_LEFT] or keys[pygame.K_a]
         moving_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+        self.movement_pressed = moving_left or moving_right
 
         self.vx = 0.0
 
@@ -185,24 +216,46 @@ class Player:
         self.x += self.vx * dt
         self.x = max(55, min(WIDTH - 55, self.x))
 
-    def update_animation(self, dt: float) -> None:
-        if self.is_moving():
-            self.run_timer += dt
-            self.idle_timer = 0.0
-        else:
-            self.idle_timer += dt
-            self.run_timer = 0.0
+    def start_animation(self, state: str) -> None:
+        """Új animációs állapot indítása mindig az adott animáció első frame-jéről."""
+        if self.animation_state != state:
+            self.animation_state = state
+            self.animation_timer = 0.0
 
-    def is_moving(self) -> bool:
-        return abs(self.vx) > 1
+    def update_animation(self, dt: float) -> None:
+        if self.movement_pressed:
+            # A gomb nyomva van: a 0-43 futás animáció menjen végig, majd loopoljon.
+            self.start_animation("run")
+            self.animation_timer += dt
+        else:
+            # Pont most engedte fel a gombot: induljon el a 44-62 megállás animáció.
+            if self.was_movement_pressed:
+                self.start_animation("stop")
+
+            if self.animation_state == "stop":
+                self.animation_timer += dt
+
+                stop_duration = len(self.stop_frames) * ANIMATION_FRAME_TIME
+                if self.animation_timer >= stop_duration:
+                    # A megállás animáció egyszer végigment, maradjon az utolsó frame-en.
+                    self.animation_timer = stop_duration
+                    self.animation_state = "idle"
+
+        self.was_movement_pressed = self.movement_pressed
 
     def current_image(self) -> pygame.Surface:
-        if self.is_moving():
-            frame_index = int(self.run_timer / 0.07) % len(self.run_frames)
+        if self.animation_state == "run":
+            # 0-43: végigmegy, majd újraindul, amíg nyomva van a gomb.
+            frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME) % len(self.run_frames)
             image = self.run_frames[frame_index]
+        elif self.animation_state == "stop":
+            # 44-62: egyszer végigmegy, nem loopol.
+            frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME)
+            frame_index = min(frame_index, len(self.stop_frames) - 1)
+            image = self.stop_frames[frame_index]
         else:
-            frame_index = int(self.idle_timer / 0.45) % len(self.idle_frames)
-            image = self.idle_frames[frame_index]
+            # Ha nincs input és a megállás animáció már lement, az utolsó megálló frame marad.
+            image = self.stop_frames[-1]
 
         if not self.facing_right:
             image = pygame.transform.flip(image, True, False)

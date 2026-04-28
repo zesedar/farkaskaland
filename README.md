@@ -1,21 +1,15 @@
-# Little Wolf Playground
+# Little Wolf Run Demo
 
-A tiny Python/Pygame platformer prototype using the wolf frames from the uploaded sprite sheet.
+A feltöltött MP4-videóból 63 képkockát kinyertem, levettem róluk a világos hátteret, és ezek adják a farkas futásanimációját.
 
-## Run it
+## Futtatás
 
 ```bash
 pip install pygame
 python main.py
 ```
 
-## Controls
+## Irányítás
 
-- Move: `A/D` or left/right arrows
-- Jump: `W`, up arrow, or space
-- Quit: close the window
-
-The background is drawn directly in `main.py`, so there is no separate background image yet.
-
-
-Updated version: includes newly generated wolf animation frames (idle, smoother run, jump) and main.py now auto-loads all matching animation frames from assets/.
+- Mozgás: `A` / `D` vagy bal / jobb nyíl
+- Kilépés: az ablak bezárása
