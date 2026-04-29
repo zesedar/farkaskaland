@@ -36,7 +36,7 @@ FAST_STOP_FRAME_TIME = 0.002
 GREEN_ALPHA_MIN_GREEN = 70
 GREEN_ALPHA_DOMINANCE = 28
 
-INTRO_TEXT = "Valami azt súgja nekem meg kell találnom a békémet..."
+INTRO_TEXT = "Valami azt súgja, meg kell találnom a békémet..."
 THORN_TEXT = "Néha csak úgy juthatunk tovább, ha megtaláljuk a legszűkebb járható ösvényt."
 BLOCKED_THOUGHT_TEXT = "Valahogy át kellene jutnom..."
 BUSH_COLLAPSE_TEXT = "Egy apróságon múlt az egész."
@@ -525,7 +525,8 @@ class IntroMenuScreen:
         self.subtitle_font = pygame.font.SysFont("arial", max(24, int(config.height * 0.038)), italic=True)
         self.option_font = pygame.font.SysFont("arial", max(28, int(config.height * 0.043)), bold=True)
         self.body_font = pygame.font.SysFont("arial", max(22, int(config.height * 0.031)))
-        self.small_font = pygame.font.SysFont("arial", max(18, int(config.height * 0.024)))
+        self.small_font = pygame.font.SysFont("arial", max(16, int(config.height * 0.024)))
+        self.quote_font = pygame.font.SysFont("arial", max(20, int(config.height * 0.025)), italic=True)
         self.option_rects: list[pygame.Rect] = []
         self.background = self._load_background()
         self.wolf_art = self._load_wolf_art()
@@ -655,7 +656,11 @@ class IntroMenuScreen:
             hint_y += surface.get_height() + hint_line_gap
 
         moon_quote = self.menu_small_font.render("„Valami azt súgja, meg kell találnom a békémet...”", True, (238, 228, 255))
-        screen.blit(moon_quote, (panel_rect.x, self.config.height - max(44, int(54 * menu_scale))))
+        moon_quote = self.quote_font.render(INTRO_TEXT, True, (238, 228, 255))
+        moon_quote_rect = moon_quote.get_rect(
+          bottomleft=(int(self.config.width * 0.09), self.config.height - 36)
+        )       
+        screen.blit(moon_quote, moon_quote_rect)
 
         if self.wolf_art is not None:
             wolf = self.wolf_art.copy()
