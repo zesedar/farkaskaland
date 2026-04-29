@@ -1,81 +1,62 @@
+from __future__ import annotations
+
 from pathlib import Path
 from collections import deque
 import random
+import textwrap
+import math
 import pygame
 
-# Ablak
-WIDTH, HEIGHT = 960, 540
 FPS = 60
+PLAYER_SPEED = 300
+SPRITE_HEIGHT = 132
+JUMP_SPEED = 820
+GRAVITY = 1700
+MAX_FALL_SPEED = 1250
 
-# Talaj
-GROUND_Y = 430
-
-# Farkas mozgás
-PLAYER_SPEED = 280
-
-# A játékbeli méret. Ha nagyobb/kisebb farkast szeretnél a pályán,
-# elég ezt az egy értéket állítani.
-SPRITE_HEIGHT = 120
-
-# A mellékelt alap stance kép, wolf_run_0063.png, forrásmagassága 328 px.
-# Az ugrás képkockáit ehhez az eredeti mérethez igazítjuk, ezért nem lesznek kicsik.
 REFERENCE_STANCE_SOURCE_HEIGHT = 328
-
-LEFT_EDGE_X = 55
-RIGHT_EDGE_X = WIDTH - 55
-BACKGROUND_SEGMENT_WIDTH = WIDTH
-
-# Ugrás fizika
-# A y koordináta lefelé nő, ezért az ugrás induló sebessége negatív.
-# Kicsit magasabb és lebegősebb ugrásra hangolva.
-JUMP_SPEED = 780
-GRAVITY = 1500
-MAX_FALL_SPEED = 1100
-
-# Ugrás animáció: 2 sor x 4 oszlopos sprite sheet.
-# Mentsd a feltöltött ugrás képet ide: assets/wolf_jump_sheet.png
 JUMP_SHEET_FILENAME = "wolf_jump_sheet.png"
 JUMP_SHEET_COLUMNS = 4
 JUMP_SHEET_ROWS = 2
 JUMP_ASCEND_FRAME_TIME = 0.12
-JUMP_DESCEND_FRAME_TIME = 0.14
+JUMP_DESCEND_FRAME_TIMES = [0.10, 0.38, 0.15, 0.14]
 
-# Külön képfájlok adatai
-# A képek legyenek itt: assets/
-# Példa: assets/wolf_run_0001.png, assets/wolf_run_0002.png, ...
-# Logikai frame-ek:
-# 0-43: futás animáció
-# 44-62: megállás animáció
-# Mivel a fájlnevek 1-től indulnak:
-# 0. frame  -> wolf_run_0001.png
-# 43. frame -> wolf_run_0044.png
-# 44. frame -> wolf_run_0045.png
-# 62. frame -> wolf_run_0063.png
 FRAME_FILE_PREFIX = "wolf_run_"
 FRAME_FILE_EXTENSION = ".png"
 FRAME_FILE_DIGITS = 4
 TOTAL_FRAME_COUNT = 63
-
 RUN_START_FRAME = 0
 RUN_END_FRAME = 43
 STOP_START_FRAME = 44
 STOP_END_FRAME = 62
 ANIMATION_FRAME_TIME = 0.07
-
-# Ezek a fájlok kicsit zavaróak lassan lejátszva, ezért csak őket gyorsítjuk.
-# Fontos: ez fájlnév szerinti számozás, tehát wolf_run_0052.png - wolf_run_0059.png.
 FAST_STOP_FILE_START = 52
 FAST_STOP_FILE_END = 59
 FAST_STOP_FRAME_TIME = 0.002
 
-# A képeken a zöld háttér jelöli az átlátszó részeket.
-# Nem csak egyetlen pontos RGB-értéket kezel, hanem a zöldes árnyalatokat is.
 GREEN_ALPHA_MIN_GREEN = 70
 GREEN_ALPHA_DOMINANCE = 28
 
+INTRO_TEXT = "Valami azt súgja nekem meg kell találnom a békémet..."
+THORN_TEXT = "Néha csak úgy juthatunk tovább, ha megtaláljuk a legszűkebb járható ösvényt."
+WINDOW_TITLE = "Little Wolf Journey"
+
+
+class WorldConfig:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+        self.center_x = width // 2
+        self.left_frame_x = max(70, int(width * 0.10))
+        self.right_edge_x = int(width * 0.82)
+        # Nagyobb érték = gyorsabban, de még finoman éri utol a kamera a farkast.
+        self.camera_smoothness = 5.8
+        self.ground_top_y = int(height * 0.885)
+        self.ground_cap_height = max(12, int(height * 0.022))
+        self.ground_depth = height - self.ground_top_y
+
 
 def is_transparency_green(r: int, g: int, b: int, a: int) -> bool:
-    """Igaz, ha a pixel zöld háttérszín, amelyet átlátszóvá kell tenni."""
     if a == 0:
         return False
 
@@ -87,7 +68,6 @@ def is_transparency_green(r: int, g: int, b: int, a: int) -> bool:
 
 
 def remove_green_transparency(surface: pygame.Surface) -> pygame.Surface:
-    """A zöld háttérpixeleket teljesen átlátszóvá alakítja."""
     surface = surface.convert_alpha()
     width, height = surface.get_size()
 
@@ -96,9 +76,7 @@ def remove_green_transparency(surface: pygame.Surface) -> pygame.Surface:
         for y in range(height):
             for x in range(width):
                 r, g, b, a = surface.get_at((x, y))
-
                 if is_transparency_green(r, g, b, a):
-                    # A színt is nullázzuk, hogy méretezésnél ne maradjon zöld perem.
                     surface.set_at((x, y), (0, 0, 0, 0))
     finally:
         surface.unlock()
@@ -107,27 +85,12 @@ def remove_green_transparency(surface: pygame.Surface) -> pygame.Surface:
 
 
 def is_light_background(r: int, g: int, b: int, a: int) -> bool:
-    """Igaz, ha egy világos háttér/grid pixel átlátszóvá alakítható.
-
-    Ezt csak a sprite sheet széleiről induló flood fill használja, ezért a farkas
-    világos szőre nem tűnik el, ha nem ér hozzá a kép széléhez.
-
-    A küszöb szándékosan 210: így a halványszürke rácsvonalak is eltűnnek,
-    nem marad körülöttük nagy üres képkocka, amitől az ugrás animáció kicsi lenne.
-    """
     if a == 0:
         return False
-
     return r >= 210 and g >= 210 and b >= 210
 
 
 def remove_light_background_from_edges(surface: pygame.Surface) -> pygame.Surface:
-    """A világos háttért csak a kép szélei felől törli ki.
-
-    Ez a feltöltött ugrás sprite sheethez kell, mert fehér háttere és halvány
-    rácsvonalai vannak. A kitöltés csak a széllel összefüggő világos pixeleket
-    teszi átlátszóvá.
-    """
     surface = surface.convert_alpha()
     width, height = surface.get_size()
 
@@ -142,7 +105,6 @@ def remove_light_background_from_edges(surface: pygame.Surface) -> pygame.Surfac
     for x in range(width):
         add(x, 0)
         add(x, height - 1)
-
     for y in range(height):
         add(0, y)
         add(width - 1, y)
@@ -152,12 +114,9 @@ def remove_light_background_from_edges(surface: pygame.Surface) -> pygame.Surfac
         while queue:
             x, y = queue.popleft()
             r, g, b, a = surface.get_at((x, y))
-
             if not is_light_background(r, g, b, a):
                 continue
-
             surface.set_at((x, y), (0, 0, 0, 0))
-
             add(x + 1, y)
             add(x - 1, y)
             add(x, y + 1)
@@ -169,9 +128,7 @@ def remove_light_background_from_edges(surface: pygame.Surface) -> pygame.Surfac
 
 
 def trim_transparent_padding(surface: pygame.Surface, padding: int = 6) -> pygame.Surface:
-    """Levágja az átlátszó üres terület nagy részét a sprite körül."""
     rect = surface.get_bounding_rect(min_alpha=1)
-
     if rect.width <= 0 or rect.height <= 0:
         return surface
 
@@ -184,31 +141,20 @@ def trim_transparent_padding(surface: pygame.Surface, padding: int = 6) -> pygam
 
 
 def scale_surface_to_height(surface: pygame.Surface, target_height: int) -> pygame.Surface:
-    """Arányosan átméretez egy felületet a megadott magasságra."""
     scale = target_height / surface.get_height()
     new_width = max(1, int(surface.get_width() * scale))
     return pygame.transform.smoothscale(surface, (new_width, target_height))
 
 
 def scale_surface_by_factor(surface: pygame.Surface, scale: float) -> pygame.Surface:
-    """Arányosan átméretez egy felületet fix skálával.
-
-    Az ugrás animációnál ezt használjuk, nem pedig azt, hogy minden képkocka
-    külön-külön ugyanakkora magasságú legyen. Így a nyújtott/csukott ugró pózok
-    megőrzik az eredeti arányukat az alap stance méretéhez képest.
-    """
     new_width = max(1, int(surface.get_width() * scale))
     new_height = max(1, int(surface.get_height() * scale))
     return pygame.transform.smoothscale(surface, (new_width, new_height))
 
 
 def load_frame_file(path: Path, target_height: int) -> pygame.Surface:
-    """Betölt egy frame-képet, eltávolítja a zöld hátteret, majd átméretezi."""
     frame = pygame.image.load(str(path)).convert_alpha()
-
-    # Ezt még méretezés előtt csináljuk, hogy ne keletkezzen zöld szél a sprite körül.
     frame = remove_green_transparency(frame)
-
     return scale_surface_to_height(frame, target_height)
 
 
@@ -219,16 +165,6 @@ def load_sprite_sheet_grid(
     target_height: int,
     reference_source_height: int,
 ) -> list[pygame.Surface]:
-    """Betölt egy rácsos sprite sheetet soronként, balról jobbra.
-
-    A feltöltött ugrás képen 4 oszlop és 2 sor van, ezért abból 8 képkocka lesz.
-    Ha nincs ilyen fájl az assets mappában, üres listát ad vissza, így a játék
-    továbbra is elindul a futó képkockákból képzett tartalék animációval.
-
-    Fontos: az ugrás frame-eket nem külön-külön 120 px magasra nyújtjuk,
-    hanem az alap stance forrásmagasságához képest skálázzuk. Ettől a jump
-    animáció ugyanakkora karakter-méretű lesz, mint a futás/állás.
-    """
     if not path.exists():
         return []
 
@@ -236,24 +172,20 @@ def load_sprite_sheet_grid(
     sheet_width, sheet_height = sheet.get_size()
     cell_width = sheet_width // columns
     cell_height = sheet_height // rows
-
     frames: list[pygame.Surface] = []
 
     for row in range(rows):
         for column in range(columns):
-            # 1 pixeles belső margóval vágunk, hogy a rácsvonal ne kerüljön a sprite-ba.
             rect = pygame.Rect(
                 column * cell_width + 1,
                 row * cell_height + 1,
                 cell_width - 2,
                 cell_height - 2,
             )
-
             frame = pygame.Surface(rect.size, pygame.SRCALPHA)
             frame.blit(sheet, (0, 0), rect)
             frame = remove_light_background_from_edges(frame)
             frame = trim_transparent_padding(frame, padding=2)
-
             scale = target_height / reference_source_height
             frames.append(scale_surface_by_factor(frame, scale))
 
@@ -268,22 +200,15 @@ def load_image_sequence(
     frame_count: int,
     target_height: int,
 ) -> list[pygame.Surface]:
-    """Betölti a külön fájlokban lévő képkockákat 1-től számozva.
-
-    Példa frame_count=63 esetén:
-    wolf_run_0001.png ... wolf_run_0063.png
-    """
     frames: list[pygame.Surface] = []
     missing_files: list[str] = []
 
     for file_number in range(1, frame_count + 1):
         filename = f"{prefix}{file_number:0{digits}d}{extension}"
         path = folder / filename
-
         if not path.exists():
             missing_files.append(filename)
             continue
-
         frames.append(load_frame_file(path, target_height))
 
     if missing_files:
@@ -297,275 +222,438 @@ def load_image_sequence(
 
 
 def get_frame_index_from_timer(animation_timer: float, frame_times: list[float]) -> int:
-    """Visszaadja, hogy eltelt idő alapján melyik frame-et kell mutatni.
-
-    Ezt a megállás animációnál használjuk, mert ott egyes képkockák gyorsabbak.
-    """
     elapsed = 0.0
-
     for frame_index, frame_time in enumerate(frame_times):
         elapsed += frame_time
-
         if animation_timer < elapsed:
             return frame_index
-
     return len(frame_times) - 1
 
 
 def create_stop_frame_times() -> list[float]:
-    """Megállás animáció frame-idői.
-
-    A wolf_run_0052.png - wolf_run_0059.png fájlokat gyorsabban játsszuk le,
-    a többi megállás frame marad az eredeti tempón.
-    """
     frame_times: list[float] = []
-
     for logical_frame in range(STOP_START_FRAME, STOP_END_FRAME + 1):
         file_number = logical_frame + 1
-
         if FAST_STOP_FILE_START <= file_number <= FAST_STOP_FILE_END:
             frame_times.append(FAST_STOP_FRAME_TIME)
         else:
             frame_times.append(ANIMATION_FRAME_TIME)
-
     return frame_times
 
 
-def draw_cloud(screen: pygame.Surface, x: int, y: int, size: int) -> None:
-    """Egyszerű felhő rajzolása tetszőleges pozícióra."""
-    pygame.draw.circle(screen, (255, 255, 255), (x, y), size)
-    pygame.draw.circle(screen, (255, 255, 255), (x + int(size * 1.15), y - int(size * 0.30)), int(size * 1.20))
-    pygame.draw.circle(screen, (255, 255, 255), (x + int(size * 2.40), y), int(size * 0.90))
-    pygame.draw.rect(
-        screen,
-        (255, 255, 255),
-        (x, y, int(size * 2.45), int(size * 0.95)),
-        border_radius=max(6, size // 2),
-    )
+def wrap_text(text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+
+    lines: list[str] = []
+    current_line = words[0]
+
+    for word in words[1:]:
+        test_line = f"{current_line} {word}"
+        if font.size(test_line)[0] <= max_width:
+            current_line = test_line
+        else:
+            lines.append(current_line)
+            current_line = word
+
+    lines.append(current_line)
+    return lines
 
 
-def draw_platform(screen: pygame.Surface, rect: pygame.Rect) -> None:
-    pygame.draw.rect(screen, (217, 151, 78), rect, border_radius=4)
-    pygame.draw.rect(screen, (130, 87, 49), rect, 3, border_radius=4)
+def create_background_surface(config: WorldConfig) -> pygame.Surface:
+    # A statikus háttér a mellékelt kép.
+    # Tedd a main.py mellé image.png néven, vagy assets/static_background.png néven.
+    candidates = [
+        Path(__file__).parent / "image.png",
+        Path(__file__).parent / "assets" / "static_background.png",
+        Path("/mnt/data/image.png"),
+        Path("/mnt/data/ghostwriter_images/context/6db1dec5-6c0a-59c9-8d3b-5a4f107cae9a.png"),
+    ]
+
+    background_source = next((path for path in candidates if path.exists()), None)
+    if background_source is not None:
+        image = pygame.image.load(str(background_source)).convert()
+        return pygame.transform.smoothscale(image, (config.width, config.height))
+
+    fallback = pygame.Surface((config.width, config.height))
+    top_color = pygame.Color(12, 17, 78)
+    middle_color = pygame.Color(76, 49, 182)
+    bottom_color = pygame.Color(226, 119, 181)
+
+    for y in range(config.height):
+        t = y / max(1, config.height - 1)
+        if t < 0.65:
+            blend = t / 0.65
+            color = top_color.lerp(middle_color, blend)
+        else:
+            blend = (t - 0.65) / 0.35
+            color = middle_color.lerp(bottom_color, blend)
+        pygame.draw.line(fallback, color, (0, y), (config.width, y))
+
+    pygame.draw.circle(fallback, (245, 233, 202), (int(config.width * 0.18), int(config.height * 0.19)), int(config.height * 0.08))
+    return fallback
 
 
-class ScrollingBackground:
-    """Jobbra végtelenül gördülő, szakaszonként véletlen háttér.
+def create_ground_tile(config: WorldConfig, tile_width: int = 256) -> pygame.Surface:
+    tile_height = config.height - config.ground_top_y + 16
+    surface = pygame.Surface((tile_width, tile_height), pygame.SRCALPHA)
 
-    A háttér csak jobbra halad. Bal oldalon nem scrollozunk vissza, ezért a farkas
-    balra egyszerűen a képernyő bal szélén megáll.
-    """
+    grass_top = (121, 190, 190)
+    grass_mid = (55, 113, 133)
+    grass_shadow = (19, 44, 74)
+    dirt_top = (42, 24, 89)
+    dirt_mid = (27, 18, 68)
+    dirt_bottom = (15, 9, 42)
+    stone_color = (61, 40, 109)
+    stone_shadow = (26, 17, 62)
+    edge_glow = (86, 204, 210)
+    flower = (140, 232, 255)
+    leaf = (119, 204, 157)
 
-    def __init__(self) -> None:
-        self.scroll_x = 0.0
-        self.segment_width = BACKGROUND_SEGMENT_WIDTH
-        self.segments: dict[int, dict[str, object]] = {}
-        self._ensure_visible_segments()
+    cap_h = config.ground_cap_height
+    pygame.draw.rect(surface, grass_top, (0, 0, tile_width, cap_h + 2), border_radius=10)
+    pygame.draw.rect(surface, grass_mid, (0, cap_h - 2, tile_width, 10), border_radius=6)
+    pygame.draw.line(surface, edge_glow, (0, 2), (tile_width, 2), 2)
+    pygame.draw.line(surface, grass_shadow, (0, cap_h + 4), (tile_width, cap_h + 4), 4)
 
-    def advance(self, distance: float) -> None:
-        """Ennyivel tolja tovább a világot jobbra."""
-        if distance <= 0:
-            return
+    dirt_rect = pygame.Rect(0, cap_h + 5, tile_width, tile_height - cap_h - 5)
+    pygame.draw.rect(surface, dirt_top, dirt_rect)
+    pygame.draw.rect(surface, dirt_mid, (0, cap_h + 28, tile_width, tile_height - cap_h - 28))
+    pygame.draw.rect(surface, dirt_bottom, (0, cap_h + 55, tile_width, tile_height - cap_h - 55))
 
-        self.scroll_x += distance
-        self._ensure_visible_segments()
+    rng = random.Random(43)
+    for _ in range(18):
+        radius = rng.randint(18, 34)
+        x = rng.randint(-10, tile_width + 10)
+        y = rng.randint(cap_h + 26, tile_height + 10)
+        pygame.draw.circle(surface, stone_color, (x, y), radius)
+        pygame.draw.circle(surface, stone_shadow, (x - radius // 3, y - radius // 5), max(8, radius // 2), 2)
 
-    def _ensure_visible_segments(self) -> None:
-        first_index = int(self.scroll_x // self.segment_width)
+    for tuft_x in (20, 62, 104, 170, 214):
+        blade_h = rng.randint(10, 20)
+        pygame.draw.line(surface, leaf, (tuft_x, cap_h + 1), (tuft_x - 4, cap_h - blade_h), 3)
+        pygame.draw.line(surface, leaf, (tuft_x + 4, cap_h + 1), (tuft_x + 6, cap_h - blade_h + 3), 3)
+        pygame.draw.line(surface, leaf, (tuft_x + 1, cap_h + 1), (tuft_x + 1, cap_h - blade_h - 2), 3)
 
-        # Mindig legyen előre pár képernyőnyi háttér előkészítve.
-        for segment_index in range(first_index, first_index + 4):
-            if segment_index not in self.segments:
-                self.segments[segment_index] = self._create_segment(segment_index)
+    for flower_x in (48, 132, 196):
+        pygame.draw.circle(surface, flower, (flower_x, cap_h - 2), 2)
+        pygame.draw.circle(surface, flower, (flower_x + 5, cap_h - 1), 2)
 
-        # Régi szakaszokat kidobjuk, hogy hosszú futásnál se nőjön végtelenül a memóriahasználat.
-        for segment_index in list(self.segments):
-            if segment_index < first_index - 1 or segment_index > first_index + 4:
-                del self.segments[segment_index]
+    return surface
 
-    def _create_segment(self, segment_index: int) -> dict[str, object]:
-        # Stabil "véletlen": ugyanaz a szakasz mindig ugyanúgy néz ki, de minden új szakasz más.
-        rng = random.Random(10_000 + segment_index * 7919)
 
-        sky_colors = [
-            (136, 207, 255),
-            (126, 199, 250),
-            (150, 216, 255),
-            (158, 210, 245),
-        ]
-        ground_colors = [
-            ((93, 191, 80), (67, 151, 65)),
-            ((101, 184, 78), (74, 145, 63)),
-            ((83, 178, 88), (58, 137, 67)),
-        ]
-        hill_colors = [(99, 198, 119), (75, 176, 105), (110, 210, 125), (92, 185, 116)]
+def create_placeholder_frame(width: int, height: int, leg_phase: float = 0.0) -> pygame.Surface:
+    surf = pygame.Surface((width, height), pygame.SRCALPHA)
+    dark = (27, 34, 51)
+    fur = (85, 93, 112)
+    light = (172, 180, 196)
+    glow = (109, 207, 222)
 
-        clouds = []
-        for _ in range(rng.randint(2, 5)):
-            clouds.append(
-                (
-                    rng.randint(-40, self.segment_width - 90),
-                    rng.randint(55, 145),
-                    rng.randint(18, 34),
-                )
-            )
+    body = pygame.Rect(int(width * 0.18), int(height * 0.38), int(width * 0.48), int(height * 0.25))
+    head = pygame.Rect(int(width * 0.55), int(height * 0.25), int(width * 0.24), int(height * 0.20))
+    pygame.draw.ellipse(surf, fur, body)
+    pygame.draw.ellipse(surf, dark, body, 2)
+    pygame.draw.ellipse(surf, fur, head)
+    pygame.draw.ellipse(surf, dark, head, 2)
 
-        hills = []
-        for _ in range(rng.randint(2, 4)):
-            hills.append(
-                (
-                    rng.randint(-80, self.segment_width + 80),
-                    rng.randint(420, 470),
-                    rng.randint(120, 230),
-                    rng.choice(hill_colors),
-                )
-            )
+    ear1 = [(int(width * 0.59), int(height * 0.27)), (int(width * 0.62), int(height * 0.11)), (int(width * 0.68), int(height * 0.26))]
+    ear2 = [(int(width * 0.67), int(height * 0.28)), (int(width * 0.70), int(height * 0.12)), (int(width * 0.76), int(height * 0.29))]
+    pygame.draw.polygon(surf, dark, ear1)
+    pygame.draw.polygon(surf, dark, ear2)
 
-        platforms = []
-        for _ in range(rng.randint(1, 3)):
-            platforms.append(
-                pygame.Rect(
-                    rng.randint(70, self.segment_width - 220),
-                    rng.randint(285, 355),
-                    rng.randint(100, 170),
-                    32,
-                )
-            )
+    chest = pygame.Rect(int(width * 0.47), int(height * 0.39), int(width * 0.18), int(height * 0.23))
+    pygame.draw.ellipse(surf, light, chest)
+    tail = [(int(width * 0.18), int(height * 0.47)), (int(width * 0.02), int(height * 0.34)), (int(width * 0.12), int(height * 0.58))]
+    pygame.draw.polygon(surf, dark, tail)
 
-        return {
-            "sky_color": rng.choice(sky_colors),
-            "ground_colors": rng.choice(ground_colors),
-            "sun": (rng.randint(700, 880), rng.randint(65, 105), rng.randint(30, 44)),
-            "clouds": clouds,
-            "hills": hills,
-            "platforms": platforms,
-        }
+    offset = int(6 * leg_phase)
+    legs = [
+        (int(width * 0.31), int(height * 0.57), -offset),
+        (int(width * 0.42), int(height * 0.58), offset),
+        (int(width * 0.54), int(height * 0.57), offset),
+        (int(width * 0.63), int(height * 0.57), -offset),
+    ]
+    for x, y, dx in legs:
+        pygame.draw.line(surf, dark, (x, y), (x + dx, int(height * 0.90)), 6)
+        pygame.draw.line(surf, light, (x + 2, y + 2), (x + dx + 2, int(height * 0.90)), 2)
+
+    pygame.draw.circle(surf, glow, (int(width * 0.72), int(height * 0.34)), 3)
+    pygame.draw.line(surf, dark, (int(width * 0.76), int(height * 0.37)), (int(width * 0.84), int(height * 0.41)), 3)
+    return surf
+
+
+def create_placeholder_wolf_frames(target_height: int) -> tuple[list[pygame.Surface], list[pygame.Surface], list[pygame.Surface]]:
+    width = int(target_height * 1.5)
+    run_frames = [create_placeholder_frame(width, target_height, leg_phase=phase) for phase in (-1.0, -0.35, 0.35, 1.0)]
+    stop_frame = create_placeholder_frame(width, target_height, leg_phase=0.0)
+    stop_frames = [stop_frame for _ in range(STOP_END_FRAME - STOP_START_FRAME + 1)]
+    jump_frames = []
+    for stretch in (1.0, 1.05, 1.1, 1.08, 1.0, 0.95, 0.92, 0.98):
+        surf = create_placeholder_frame(width, target_height, leg_phase=0.0)
+        new_height = max(1, int(target_height * stretch))
+        new_width = max(1, int(surf.get_width() * (0.92 if stretch > 1 else 1.03)))
+        jump_frames.append(pygame.transform.smoothscale(surf, (new_width, new_height)))
+    return run_frames, stop_frames, jump_frames
+
+
+class DialogueBox:
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.active = False
+        self.text = ""
+        self.font = pygame.font.SysFont("arial", max(26, int(config.height * 0.036)))
+        self.hint_font = pygame.font.SysFont("arial", max(18, int(config.height * 0.024)))
+
+    def show(self, text: str) -> None:
+        self.text = text
+        self.active = True
+
+    def hide(self) -> None:
+        self.active = False
 
     def draw(self, screen: pygame.Surface) -> None:
-        first_index = int(self.scroll_x // self.segment_width)
-        tile = 48
+        if not self.active:
+            return
 
-        for segment_index in range(first_index, first_index + 3):
-            segment = self.segments[segment_index]
-            base_x = int(segment_index * self.segment_width - self.scroll_x)
+        box_width = int(self.config.width * 0.54)
+        padding_x = int(self.config.width * 0.025)
+        padding_y = int(self.config.height * 0.026)
+        line_spacing = max(8, int(self.config.height * 0.012))
+        lines = wrap_text(self.text, self.font, box_width - padding_x * 2)
 
-            sky_color = segment["sky_color"]
-            ground_top, ground_bottom = segment["ground_colors"]
-            sun_x, sun_y, sun_radius = segment["sun"]
+        text_surfaces = [self.font.render(line, True, (234, 235, 255)) for line in lines]
+        text_height = sum(surface.get_height() for surface in text_surfaces)
+        text_height += max(0, len(text_surfaces) - 1) * line_spacing
+        hint_surface = self.hint_font.render("Enter - tovább", True, (176, 198, 245))
 
-            pygame.draw.rect(screen, sky_color, (base_x, 0, self.segment_width, HEIGHT))
-            pygame.draw.circle(screen, (255, 234, 128), (base_x + sun_x, sun_y), sun_radius)
+        box_height = padding_y * 2 + text_height + hint_surface.get_height() + line_spacing + 10
+        box_rect = pygame.Rect(0, 0, box_width, box_height)
+        box_rect.center = (self.config.width // 2, self.config.height // 2)
 
-            for cloud_x, cloud_y, cloud_size in segment["clouds"]:
-                draw_cloud(screen, base_x + cloud_x, cloud_y, cloud_size)
+        shadow = box_rect.move(0, 8)
+        shadow_surf = pygame.Surface(shadow.size, pygame.SRCALPHA)
+        pygame.draw.rect(shadow_surf, (0, 0, 0, 90), shadow_surf.get_rect(), border_radius=22)
+        screen.blit(shadow_surf, shadow.topleft)
 
-            for hill_x, hill_y, hill_radius, hill_color in segment["hills"]:
-                pygame.draw.circle(screen, hill_color, (base_x + hill_x, hill_y), hill_radius)
+        panel = pygame.Surface(box_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel, (14, 20, 54, 220), panel.get_rect(), border_radius=22)
+        pygame.draw.rect(panel, (109, 133, 228, 235), panel.get_rect(), 2, border_radius=22)
+        inner = panel.get_rect().inflate(-14, -14)
+        pygame.draw.rect(panel, (40, 48, 102, 85), inner, 1, border_radius=18)
+        screen.blit(panel, box_rect.topleft)
 
-            pygame.draw.rect(screen, ground_top, (base_x, GROUND_Y, self.segment_width, HEIGHT - GROUND_Y))
-            pygame.draw.rect(
-                screen,
-                ground_bottom,
-                (base_x, GROUND_Y + 18, self.segment_width, HEIGHT - GROUND_Y - 18),
-            )
+        current_y = box_rect.y + padding_y
+        for surface in text_surfaces:
+            text_rect = surface.get_rect(centerx=box_rect.centerx, y=current_y)
+            screen.blit(surface, text_rect)
+            current_y += surface.get_height() + line_spacing
 
-            for x in range(0, self.segment_width + tile, tile):
-                line_x = base_x + x
-                pygame.draw.line(screen, (53, 130, 55), (line_x, GROUND_Y + 18), (line_x, HEIGHT), 2)
+        hint_rect = hint_surface.get_rect(centerx=box_rect.centerx, bottom=box_rect.bottom - padding_y + 2)
+        screen.blit(hint_surface, hint_rect)
 
-            for y in range(GROUND_Y + 18, HEIGHT, tile):
-                pygame.draw.line(screen, (53, 130, 55), (base_x, y), (base_x + self.segment_width, y), 2)
 
-            for platform in segment["platforms"]:
-                screen_rect = platform.move(base_x, 0)
-                draw_platform(screen, screen_rect)
+class ThornBush:
+    def __init__(self, world_x: float, ground_y: int, scale: float = 1.0) -> None:
+        self.world_x = world_x
+        self.ground_y = ground_y
+        self.surface = self._create_surface(scale)
+        self.width = self.surface.get_width()
+        self.height = self.surface.get_height()
+        self.trigger_distance = 430
+        self.stop_distance = 420
+
+    def _create_surface(self, scale: float) -> pygame.Surface:
+        width = int(620 * scale)
+        height = int(300 * scale)
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        rng = random.Random(901)
+
+        branch_dark = (24, 16, 52)
+        branch_mid = (43, 28, 84)
+        thorn = (146, 163, 255)
+        thorn_shadow = (73, 47, 126)
+        leaf = (36, 68, 84)
+        leaf_glow = (94, 111, 174)
+        haze = (104, 66, 165, 55)
+
+        for i in range(8):
+            haze_rect = pygame.Rect(int(width * 0.07) + i * 30, int(height * 0.30) + (i % 3) * 8, int(width * 0.75), int(height * 0.45))
+            pygame.draw.ellipse(surface, haze, haze_rect)
+
+        bases = [
+            (int(width * 0.18), int(height * 0.82)),
+            (int(width * 0.33), int(height * 0.84)),
+            (int(width * 0.50), int(height * 0.85)),
+            (int(width * 0.67), int(height * 0.84)),
+            (int(width * 0.82), int(height * 0.80)),
+        ]
+
+        for base_x, base_y in bases:
+            points = [(base_x, base_y)]
+            current_x = base_x
+            current_y = base_y
+            for _ in range(rng.randint(5, 8)):
+                current_x += rng.randint(-60, 60)
+                current_y -= rng.randint(20, 40)
+                points.append((current_x, current_y))
+
+            pygame.draw.lines(surface, branch_dark, False, points, 12)
+            pygame.draw.lines(surface, branch_mid, False, points, 6)
+
+            for x1, y1, x2, y2 in zip((p[0] for p in points), (p[1] for p in points), (p[0] for p in points[1:]), (p[1] for p in points[1:])):
+                mid_x = (x1 + x2) // 2
+                mid_y = (y1 + y2) // 2
+                for direction in (-1, 1):
+                    thorn_length = rng.randint(16, 32)
+                    thorn_base = (mid_x, mid_y)
+                    thorn_tip = (mid_x + direction * thorn_length, mid_y - rng.randint(8, 16))
+                    thorn_side = (mid_x + direction * (thorn_length // 2), mid_y + 7)
+                    pygame.draw.polygon(surface, thorn_shadow, [thorn_base, thorn_tip, thorn_side])
+                    pygame.draw.polygon(surface, thorn, [thorn_base, thorn_tip, thorn_side], 1)
+
+        for _ in range(26):
+            cx = rng.randint(40, width - 40)
+            cy = rng.randint(int(height * 0.25), int(height * 0.82))
+            radius = rng.randint(20, 36)
+            pygame.draw.circle(surface, leaf, (cx, cy), radius)
+            pygame.draw.circle(surface, leaf_glow, (cx - radius // 4, cy - radius // 4), max(8, radius // 2), 2)
+
+        return surface
+
+    @property
+    def left_edge(self) -> float:
+        return self.world_x
+
+    def trigger_x(self) -> float:
+        return self.left_edge - self.trigger_distance
+
+    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+        screen_x = int(self.world_x - camera_x)
+        bottom_y = self.ground_y + 18
+        rect = self.surface.get_rect(bottomleft=(screen_x, bottom_y))
+        screen.blit(self.surface, rect)
+
 
 class Player:
-    def __init__(self) -> None:
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
         asset_dir = Path(__file__).parent / "assets"
-
-        frames = load_image_sequence(
-            folder=asset_dir,
-            prefix=FRAME_FILE_PREFIX,
-            extension=FRAME_FILE_EXTENSION,
-            digits=FRAME_FILE_DIGITS,
-            frame_count=TOTAL_FRAME_COUNT,
-            target_height=SPRITE_HEIGHT,
-        )
-
-        needed_frame_count = STOP_END_FRAME + 1
-        if len(frames) < needed_frame_count:
-            raise ValueError(
-                f"Csak {len(frames)} képkocka lett betöltve. "
-                f"Legalább {needed_frame_count} kell, mert a kód a 0-{STOP_END_FRAME} frame-eket használja."
-            )
-
-        # 0-43: futás. Fájlnév szerint ez wolf_run_0001.png - wolf_run_0044.png.
-        self.run_frames = frames[RUN_START_FRAME : RUN_END_FRAME + 1]
-
-        # 44-62: megállás. Fájlnév szerint ez wolf_run_0045.png - wolf_run_0063.png.
-        self.stop_frames = frames[STOP_START_FRAME : STOP_END_FRAME + 1]
         self.stop_frame_times = create_stop_frame_times()
 
-        # Ugrás: a feltöltött 2x4-es sprite sheetből 8 frame-et vágunk ki.
-        self.jump_frames = load_sprite_sheet_grid(
-            path=asset_dir / JUMP_SHEET_FILENAME,
-            columns=JUMP_SHEET_COLUMNS,
-            rows=JUMP_SHEET_ROWS,
-            target_height=SPRITE_HEIGHT,
-            reference_source_height=REFERENCE_STANCE_SOURCE_HEIGHT,
-        )
+        try:
+            frames = load_image_sequence(
+                folder=asset_dir,
+                prefix=FRAME_FILE_PREFIX,
+                extension=FRAME_FILE_EXTENSION,
+                digits=FRAME_FILE_DIGITS,
+                frame_count=TOTAL_FRAME_COUNT,
+                target_height=SPRITE_HEIGHT,
+            )
+            needed_frame_count = STOP_END_FRAME + 1
+            if len(frames) < needed_frame_count:
+                raise ValueError(
+                    f"Csak {len(frames)} képkocka lett betöltve. Legalább {needed_frame_count} kell."
+                )
+            self.run_frames = frames[RUN_START_FRAME : RUN_END_FRAME + 1]
+            self.stop_frames = frames[STOP_START_FRAME : STOP_END_FRAME + 1]
+            self.jump_frames = load_sprite_sheet_grid(
+                path=asset_dir / JUMP_SHEET_FILENAME,
+                columns=JUMP_SHEET_COLUMNS,
+                rows=JUMP_SHEET_ROWS,
+                target_height=SPRITE_HEIGHT,
+                reference_source_height=REFERENCE_STANCE_SOURCE_HEIGHT,
+            )
+            if not self.jump_frames:
+                self.jump_frames = [
+                    self.run_frames[0],
+                    self.run_frames[len(self.run_frames) // 4],
+                    self.run_frames[len(self.run_frames) // 2],
+                    self.run_frames[-1],
+                ]
+        except Exception:
+            self.run_frames, self.stop_frames, self.jump_frames = create_placeholder_wolf_frames(SPRITE_HEIGHT)
 
-        if not self.jump_frames:
-            # Tartalék, hogy a játék akkor is fusson, ha még nincs bemásolva a jump sheet.
-            self.jump_frames = [
-                self.run_frames[0],
-                self.run_frames[len(self.run_frames) // 4],
-                self.run_frames[len(self.run_frames) // 2],
-                self.run_frames[-1],
-            ]
-
-        self.x = 180.0
-        self.y = float(GROUND_Y)
-
+        self.world_x = float(max(120, int(config.width * 0.16)))
+        self.y = float(config.ground_top_y)
         self.vx = 0.0
         self.vy = 0.0
         self.facing_right = True
         self.on_ground = True
-
+        self.jump_pressed_last_frame = False
         self.movement_pressed = False
         self.was_movement_pressed = False
-        self.jump_pressed_last_frame = False
-
-        # Lehetséges állapotok: "idle", "run", "stop", "jump".
         self.animation_state = "idle"
         self.animation_timer = 0.0
-
-        # Ugrás animáció két részre bontva: felfelé és lefelé.
-        # Így a sprite sheet második sora (esés/érkezés) biztosan látszik.
         self.jump_phase = "up"
         self.jump_phase_timer = 0.0
+        self.collision_half_width = 38
 
-    def handle_input(self, dt: float, background: ScrollingBackground) -> None:
+    def get_current_width(self) -> int:
+        return self.current_image().get_width()
+
+    def start_animation(self, state: str) -> None:
+        if self.animation_state != state:
+            self.animation_state = state
+            self.animation_timer = 0.0
+
+    def set_jump_phase(self, phase: str) -> None:
+        if self.jump_phase != phase:
+            self.jump_phase = phase
+            self.jump_phase_timer = 0.0
+
+    def current_jump_image(self) -> pygame.Surface:
+        frame_count = len(self.jump_frames)
+        if frame_count <= 4:
+            frame_index = min(int(self.animation_timer / 0.13), frame_count - 1)
+            return self.jump_frames[frame_index]
+
+        ascend_count = frame_count // 2
+        descend_count = frame_count - ascend_count
+
+        if self.jump_phase == "up":
+            local_index = min(int(self.jump_phase_timer / JUMP_ASCEND_FRAME_TIME), ascend_count - 1)
+            frame_index = local_index
+        else:
+            descend_frame_times = JUMP_DESCEND_FRAME_TIMES[:descend_count]
+            if len(descend_frame_times) < descend_count:
+                descend_frame_times += [JUMP_DESCEND_FRAME_TIMES[-1]] * (descend_count - len(descend_frame_times))
+            local_index = get_frame_index_from_timer(self.jump_phase_timer, descend_frame_times)
+            frame_index = ascend_count + local_index
+
+        return self.jump_frames[frame_index]
+
+    def current_image(self) -> pygame.Surface:
+        if self.animation_state == "jump":
+            image = self.current_jump_image()
+        elif self.animation_state == "run":
+            frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME) % len(self.run_frames)
+            image = self.run_frames[frame_index]
+        elif self.animation_state == "stop":
+            frame_index = get_frame_index_from_timer(self.animation_timer, self.stop_frame_times)
+            image = self.stop_frames[frame_index]
+        else:
+            image = self.stop_frames[-1]
+
+        if not self.facing_right:
+            image = pygame.transform.flip(image, True, False)
+        return image
+
+    def handle_input(self, dt: float, obstacle_left_edge: float | None, controls_enabled: bool) -> None:
         keys = pygame.key.get_pressed()
+        moving_left = controls_enabled and (keys[pygame.K_LEFT] or keys[pygame.K_a])
+        moving_right = controls_enabled and (keys[pygame.K_RIGHT] or keys[pygame.K_d])
+        jump_pressed = controls_enabled and (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP])
 
-        moving_left = keys[pygame.K_LEFT] or keys[pygame.K_a]
-        moving_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
-        jump_pressed = keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP]
-        self.movement_pressed = moving_left or moving_right
+        horizontal_input = int(moving_right) - int(moving_left)
+        self.movement_pressed = horizontal_input != 0
+        self.vx = horizontal_input * PLAYER_SPEED
 
-        self.vx = 0.0
-
-        if moving_left:
-            self.vx = -PLAYER_SPEED
+        if horizontal_input < 0:
             self.facing_right = False
-
-        if moving_right:
-            self.vx = PLAYER_SPEED
+        elif horizontal_input > 0:
             self.facing_right = True
 
-        # Ugrás csak akkor indulhat, amikor a gombot most nyomták le és a farkas talajon van.
-        # Így a Space/W/↑ nyomva tartása nem indít végtelen ugrást.
         if jump_pressed and not self.jump_pressed_last_frame and self.on_ground:
             self.vy = -JUMP_SPEED
             self.on_ground = False
@@ -575,186 +663,184 @@ class Player:
 
         self.jump_pressed_last_frame = jump_pressed
 
-        movement = self.vx * dt
+        next_world_x = self.world_x + self.vx * dt
 
-        if self.vx > 0:
-            next_x = self.x + movement
+        # Balra is lehet haladni, de a világ legelején a farkas nem mehet ki
+        # a képernyő bal szélén túl.
+        min_x = float(self.config.left_frame_x)
+        next_world_x = max(min_x, next_world_x)
 
-            if next_x > RIGHT_EDGE_X:
-                # A farkas a jobb szélen marad, a felesleges mozgás pedig továbbtolja a világot.
-                background.advance(next_x - RIGHT_EDGE_X)
-                self.x = RIGHT_EDGE_X
-            else:
-                self.x = next_x
-        elif self.vx < 0:
-            # Bal oldalon nincs végtelen világ: egyszerűen megáll a bal szélnél.
-            self.x = max(LEFT_EDGE_X, self.x + movement)
+        if obstacle_left_edge is not None:
+            max_x = obstacle_left_edge - self.collision_half_width
+            next_world_x = min(next_world_x, max_x)
+
+        self.world_x = next_world_x
 
     def update_physics(self, dt: float) -> None:
-        """Egyszerű gravitáció és talajra érkezés kezelése."""
         if self.on_ground:
             return
 
         self.vy = min(MAX_FALL_SPEED, self.vy + GRAVITY * dt)
         self.y += self.vy * dt
-
-        if self.y >= GROUND_Y:
-            self.y = float(GROUND_Y)
+        if self.y >= self.config.ground_top_y:
+            self.y = float(self.config.ground_top_y)
             self.vy = 0.0
             self.on_ground = True
 
-    def start_animation(self, state: str) -> None:
-        """Új animációs állapot indítása mindig az adott animáció első frame-jéről."""
-        if self.animation_state != state:
-            self.animation_state = state
-            self.animation_timer = 0.0
-
-    def set_jump_phase(self, phase: str) -> None:
-        """Az ugrás fázisváltásakor újraindítja a helyi jump animációs időzítőt."""
-        if self.jump_phase != phase:
-            self.jump_phase = phase
-            self.jump_phase_timer = 0.0
-
     def update_animation(self, dt: float) -> None:
         if not self.on_ground:
-            # Levegőben mindig az ugrás animáció aktív.
-            # A sprite sheet első fele a felszállás, a második fele a lefelé jövő rész.
             self.start_animation("jump")
-
             if self.vy < 0:
                 self.set_jump_phase("up")
             else:
                 self.set_jump_phase("down")
-
             self.animation_timer += dt
             self.jump_phase_timer += dt
             self.was_movement_pressed = self.movement_pressed
             return
 
         if self.animation_state == "jump":
-            # Földet érés után térjen vissza futásba vagy alapállásba.
             if self.movement_pressed:
                 self.start_animation("run")
             else:
                 self.start_animation("idle")
 
         if self.movement_pressed:
-            # A gomb nyomva van: a 0-43 futás animáció menjen végig, majd loopoljon.
             self.start_animation("run")
             self.animation_timer += dt
         else:
-            # Pont most engedte fel a gombot: induljon el a 44-62 megállás animáció.
             if self.was_movement_pressed:
                 self.start_animation("stop")
-
             if self.animation_state == "stop":
                 self.animation_timer += dt
-
                 stop_duration = sum(self.stop_frame_times)
                 if self.animation_timer >= stop_duration:
-                    # A megállás animáció egyszer végigment, maradjon az utolsó frame-en.
                     self.animation_timer = stop_duration
                     self.animation_state = "idle"
 
         self.was_movement_pressed = self.movement_pressed
 
-    def current_jump_image(self) -> pygame.Surface:
-        """Az ugrás képkockáját felfelé/lefelé fázis alapján választja ki."""
-        frame_count = len(self.jump_frames)
-
-        if frame_count <= 4:
-            frame_index = min(int(self.animation_timer / 0.13), frame_count - 1)
-            return self.jump_frames[frame_index]
-
-        ascend_count = frame_count // 2
-        descend_count = frame_count - ascend_count
-
-        if self.jump_phase == "up":
-            local_index = min(
-                int(self.jump_phase_timer / JUMP_ASCEND_FRAME_TIME),
-                ascend_count - 1,
-            )
-            frame_index = local_index
-        else:
-            local_index = min(
-                int(self.jump_phase_timer / JUMP_DESCEND_FRAME_TIME),
-                descend_count - 1,
-            )
-            frame_index = ascend_count + local_index
-
-        return self.jump_frames[frame_index]
-
-    def current_image(self) -> pygame.Surface:
-        if self.animation_state == "jump":
-            image = self.current_jump_image()
-        elif self.animation_state == "run":
-            # 0-43: végigmegy, majd újraindul, amíg nyomva van a gomb.
-            frame_index = int(self.animation_timer / ANIMATION_FRAME_TIME) % len(self.run_frames)
-            image = self.run_frames[frame_index]
-        elif self.animation_state == "stop":
-            # 44-62: egyszer végigmegy, nem loopol.
-            # A wolf_run_0052.png - wolf_run_0059.png fájlok gyorsabban mennek át.
-            frame_index = get_frame_index_from_timer(self.animation_timer, self.stop_frame_times)
-            image = self.stop_frames[frame_index]
-        else:
-            # Ha nincs input és a megállás animáció már lement, az utolsó megálló frame marad.
-            image = self.stop_frames[-1]
-
-        if not self.facing_right:
-            image = pygame.transform.flip(image, True, False)
-
-        return image
-
-    def draw(self, screen: pygame.Surface) -> None:
-        # Árnyék: ugrás közben kisebb lesz, de a talajon marad.
-        height_above_ground = max(0.0, GROUND_Y - self.y)
+    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+        screen_x = int(self.world_x - camera_x)
+        height_above_ground = max(0.0, self.config.ground_top_y - self.y)
         shadow_scale = max(0.42, 1.0 - height_above_ground / 270.0)
-        shadow_rect = pygame.Rect(0, 0, int(88 * shadow_scale), int(16 * shadow_scale))
-        shadow_rect.center = (int(self.x), GROUND_Y + 7)
-        pygame.draw.ellipse(screen, (62, 92, 65), shadow_rect)
+        shadow_rect = pygame.Rect(0, 0, int(96 * shadow_scale), int(16 * shadow_scale))
+        shadow_rect.center = (screen_x, self.config.ground_top_y + 8)
+        pygame.draw.ellipse(screen, (33, 27, 72), shadow_rect)
 
         image = self.current_image()
-        rect = image.get_rect(midbottom=(int(self.x), int(self.y)))
+        rect = image.get_rect(midbottom=(screen_x, int(self.y)))
         screen.blit(image, rect)
 
 
-def main() -> None:
-    pygame.init()
+class Game:
+    def __init__(self) -> None:
+        pygame.init()
+        pygame.display.set_caption(WINDOW_TITLE)
 
-    pygame.display.set_caption("Little Wolf Run Demo")
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    clock = pygame.time.Clock()
+        info = pygame.display.Info()
+        self.config = WorldConfig(max(960, info.current_w), max(540, info.current_h))
+        self.screen = pygame.display.set_mode((self.config.width, self.config.height), pygame.FULLSCREEN)
+        self.clock = pygame.time.Clock()
 
-    player = Player()
-    background = ScrollingBackground()
+        self.background = create_background_surface(self.config)
+        self.ground_tile = create_ground_tile(self.config)
+        self.player = Player(self.config)
+        self.dialogue = DialogueBox(self.config)
+        self.bush = ThornBush(world_x=2500, ground_y=self.config.ground_top_y, scale=max(1.0, self.config.height / 700))
 
-    font = pygame.font.SysFont(None, 26)
+        self.camera_x = 0.0
+        self.bush_event_triggered = False
+        self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
+        self.running = True
 
-    running = True
-    while running:
-        dt = clock.tick(FPS) / 1000.0
+        self.dialogue.show(INTRO_TEXT)
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+    def controls_enabled(self) -> bool:
+        return not self.dialogue.active
 
-        player.handle_input(dt, background)
-        player.update_physics(dt)
-        player.update_animation(dt)
+    def obstacle_left_edge(self) -> float | None:
+        return self.bush.left_edge if self.bush_event_triggered else None
 
-        background.draw(screen)
-        player.draw(screen)
+    def trigger_bush_event(self) -> None:
+        self.bush_event_triggered = True
+        self.player.world_x = self.bush.left_edge - self.bush.stop_distance
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.was_movement_pressed = False
+        self.player.start_animation("idle")
+        self.camera_x = max(0.0, self.player.world_x - self.config.left_frame_x)
+        self.dialogue.show(THORN_TEXT)
 
-        help_text = font.render(
-            "Move: A/D or ←/→    Jump: Space/W/↑    Right edge: infinite random background",
-            True,
-            (30, 40, 45),
-        )
-        screen.blit(help_text, (22, 18))
+    def update_camera(self, dt: float) -> None:
+        if self.dialogue.active and self.bush_event_triggered:
+            target_camera_x = max(0.0, self.player.world_x - self.config.left_frame_x)
+        else:
+            # Folyamatos, simított kamera: jobbra és balra is követi a farkast,
+            # de a pálya elején nem görget negatív irányba.
+            target_camera_x = max(0.0, self.player.world_x - self.config.center_x)
 
+        smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
+        self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
+
+    def draw_ground(self) -> None:
+        tile_width = self.ground_tile.get_width()
+        start_x = -int(self.camera_x % tile_width) - tile_width
+        y = self.config.ground_top_y - 2
+        for x in range(start_x, self.config.width + tile_width, tile_width):
+            self.screen.blit(self.ground_tile, (x, y))
+
+    def draw_help(self) -> None:
+        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    Enter: üzenet bezárása    Esc: kilépés"
+        surface = self.debug_font.render(text, True, (226, 232, 255))
+        bg = pygame.Surface((surface.get_width() + 22, surface.get_height() + 14), pygame.SRCALPHA)
+        pygame.draw.rect(bg, (8, 12, 34, 110), bg.get_rect(), border_radius=14)
+        self.screen.blit(bg, (18, 18))
+        self.screen.blit(surface, (29, 25))
+
+    def draw(self) -> None:
+        self.screen.blit(self.background, (0, 0))
+        self.bush.draw(self.screen, self.camera_x)
+        self.draw_ground()
+        self.player.draw(self.screen, self.camera_x)
+        self.draw_help()
+        self.dialogue.draw(self.screen)
         pygame.display.flip()
 
-    pygame.quit()
+    def run(self) -> None:
+        while self.running:
+            dt = self.clock.tick(FPS) / 1000.0
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.running = False
+                    elif event.key == pygame.K_RETURN and self.dialogue.active:
+                        self.dialogue.hide()
+
+            if (
+                not self.bush_event_triggered
+                and self.player.world_x >= self.bush.trigger_x()
+            ):
+                self.trigger_bush_event()
+
+            self.player.handle_input(
+                dt,
+                obstacle_left_edge=self.obstacle_left_edge(),
+                controls_enabled=self.controls_enabled(),
+            )
+            self.player.update_physics(dt)
+            self.player.update_animation(dt)
+            self.update_camera(dt)
+            self.draw()
+
+        pygame.quit()
+
+
+def main() -> None:
+    Game().run()
 
 
 if __name__ == "__main__":
