@@ -516,6 +516,11 @@ class IntroMenuScreen:
         self.config = config
         self.options = ["Játék indítása", "Névjegy", "Kilépés"]
         self.selected_index = 0
+        self.menu_scale = 0.78  # A főmenü bal oldali paneljének és szövegeinek arányos kicsinyítése.
+        self.menu_title_font = pygame.font.SysFont("georgia", max(42, int(config.height * 0.085 * self.menu_scale)), bold=True)
+        self.menu_subtitle_font = pygame.font.SysFont("arial", max(19, int(config.height * 0.038 * self.menu_scale)), italic=True)
+        self.menu_option_font = pygame.font.SysFont("arial", max(22, int(config.height * 0.043 * self.menu_scale)), bold=True)
+        self.menu_small_font = pygame.font.SysFont("arial", max(14, int(config.height * 0.024 * self.menu_scale)))
         self.title_font = pygame.font.SysFont("georgia", max(54, int(config.height * 0.085)), bold=True)
         self.subtitle_font = pygame.font.SysFont("arial", max(24, int(config.height * 0.038)), italic=True)
         self.option_font = pygame.font.SysFont("arial", max(28, int(config.height * 0.043)), bold=True)
@@ -591,50 +596,66 @@ class IntroMenuScreen:
         overlay.fill((5, 8, 26, 106))
         screen.blit(overlay, (0, 0))
 
-        panel_w = int(self.config.width * 0.58)
-        panel_h = int(self.config.height * 0.54)
-        panel_rect = pygame.Rect(int(self.config.width * 0.09), int(self.config.height * 0.18), panel_w, panel_h)
+        menu_scale = self.menu_scale
+        panel_w = int(self.config.width * 0.44)
+        panel_h = int(self.config.height * 0.46)
+        panel_rect = pygame.Rect(int(self.config.width * 0.08), int(self.config.height * 0.20), panel_w, panel_h)
+        corner_radius = max(18, int(28 * menu_scale))
 
         panel_shadow = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(panel_shadow, (0, 0, 0, 95), panel_shadow.get_rect(), border_radius=28)
-        screen.blit(panel_shadow, panel_rect.move(0, 10).topleft)
+        pygame.draw.rect(panel_shadow, (0, 0, 0, 95), panel_shadow.get_rect(), border_radius=corner_radius)
+        screen.blit(panel_shadow, panel_rect.move(0, max(6, int(10 * menu_scale))).topleft)
 
         panel = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
-        pygame.draw.rect(panel, (11, 15, 41, 188), panel.get_rect(), border_radius=28)
-        pygame.draw.rect(panel, (129, 151, 239, 225), panel.get_rect(), 2, border_radius=28)
+        pygame.draw.rect(panel, (11, 15, 41, 188), panel.get_rect(), border_radius=corner_radius)
+        pygame.draw.rect(panel, (129, 151, 239, 225), panel.get_rect(), 2, border_radius=corner_radius)
         screen.blit(panel, panel_rect.topleft)
 
-        title = self.title_font.render(WINDOW_TITLE, True, (241, 239, 255))
-        subtitle = self.subtitle_font.render("Holdfényes utazás egy csendes, meseszerű világban.", True, (201, 208, 255))
-        screen.blit(title, (panel_rect.x + 34, panel_rect.y + 28))
-        screen.blit(subtitle, (panel_rect.x + 36, panel_rect.y + 108))
+        pad_x = max(22, int(34 * menu_scale))
+        title = self.menu_title_font.render(WINDOW_TITLE, True, (241, 239, 255))
+        subtitle = self.menu_subtitle_font.render("Holdfényes utazás egy csendes, meseszerű világban.", True, (201, 208, 255))
+        screen.blit(title, (panel_rect.x + pad_x, panel_rect.y + max(20, int(28 * menu_scale))))
+        screen.blit(subtitle, (panel_rect.x + pad_x, panel_rect.y + max(82, int(108 * menu_scale))))
 
         self.option_rects = []
-        start_y = panel_rect.y + 170
-        box_h = max(54, int(self.config.height * 0.08))
+        start_y = panel_rect.y + max(126, int(170 * menu_scale))
+        box_h = max(42, int(self.config.height * 0.08 * menu_scale))
+        box_gap = max(12, int(18 * menu_scale))
+        option_pad_x = max(22, int(30 * menu_scale))
+        option_radius = max(13, int(18 * menu_scale))
         for index, option in enumerate(self.options):
-            rect = pygame.Rect(panel_rect.x + 30, start_y + index * (box_h + 18), panel_rect.width - 60, box_h)
+            rect = pygame.Rect(panel_rect.x + option_pad_x, start_y + index * (box_h + box_gap), panel_rect.width - option_pad_x * 2, box_h)
             self.option_rects.append(rect)
             selected = index == self.selected_index
             box = pygame.Surface(rect.size, pygame.SRCALPHA)
             fill = (137, 112, 232, 210) if selected else (29, 38, 89, 170)
             border = (238, 228, 255, 240) if selected else (120, 139, 219, 210)
-            pygame.draw.rect(box, fill, box.get_rect(), border_radius=18)
-            pygame.draw.rect(box, border, box.get_rect(), 2, border_radius=18)
+            pygame.draw.rect(box, fill, box.get_rect(), border_radius=option_radius)
+            pygame.draw.rect(box, border, box.get_rect(), 2, border_radius=option_radius)
             screen.blit(box, rect.topleft)
-            label = self.option_font.render(option, True, (255, 248, 255) if selected else (224, 231, 255))
+            label = self.menu_option_font.render(option, True, (255, 248, 255) if selected else (224, 231, 255))
             label_rect = label.get_rect(center=rect.center)
             screen.blit(label, label_rect)
 
-        hint = self.small_font.render("Választás: ↑/↓ vagy W/S   •   Elfogadás: Enter   •   Egérrel is kattintható", True, (220, 227, 255))
-        hint_bg = pygame.Surface((hint.get_width() + 20, hint.get_height() + 12), pygame.SRCALPHA)
-        pygame.draw.rect(hint_bg, (7, 12, 34, 125), hint_bg.get_rect(), border_radius=16)
-        hint_pos = (panel_rect.x + 24, panel_rect.bottom+5)
+        hint_text = "↑/↓ vagy W/S: választás • Enter: elfogadás • Egér: kattintás"
+        hint_lines = wrap_text(hint_text, self.menu_small_font, panel_rect.width - pad_x * 2)
+        hint_surfaces = [self.menu_small_font.render(line, True, (220, 227, 255)) for line in hint_lines]
+        hint_line_gap = max(3, int(5 * menu_scale))
+        hint_w = max(surface.get_width() for surface in hint_surfaces)
+        hint_h = sum(surface.get_height() for surface in hint_surfaces) + max(0, len(hint_surfaces) - 1) * hint_line_gap
+        hint_pad_x = max(8, int(10 * menu_scale))
+        hint_pad_y = max(5, int(6 * menu_scale))
+        hint_bg = pygame.Surface((hint_w + hint_pad_x * 2, hint_h + hint_pad_y * 2), pygame.SRCALPHA)
+        pygame.draw.rect(hint_bg, (7, 12, 34, 125), hint_bg.get_rect(), border_radius=max(12, int(16 * menu_scale)))
+        hint_pos = (panel_rect.x + pad_x - hint_pad_x, panel_rect.bottom + max(4, int(5 * menu_scale)))
         screen.blit(hint_bg, hint_pos)
-        screen.blit(hint, (hint_pos[0] + 10, hint_pos[1] + 6))
+        hint_y = hint_pos[1] + hint_pad_y
+        for surface in hint_surfaces:
+            screen.blit(surface, (hint_pos[0] + hint_pad_x, hint_y))
+            hint_y += surface.get_height() + hint_line_gap
 
-        moon_quote = self.small_font.render("„Valami azt súgja, meg kell találnom a békémet...”", True, (238, 228, 255))
-        screen.blit(moon_quote, (int(self.config.width * 0.09), self.config.height - 54))
+        moon_quote = self.menu_small_font.render("„Valami azt súgja, meg kell találnom a békémet...”", True, (238, 228, 255))
+        screen.blit(moon_quote, (panel_rect.x, self.config.height - max(44, int(54 * menu_scale))))
 
         if self.wolf_art is not None:
             wolf = self.wolf_art.copy()
