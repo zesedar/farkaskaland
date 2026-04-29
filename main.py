@@ -39,10 +39,10 @@ GREEN_ALPHA_DOMINANCE = 28
 INTRO_TEXT = "Valami azt súgja nekem meg kell találnom a békémet..."
 THORN_TEXT = "Néha csak úgy juthatunk tovább, ha megtaláljuk a legszűkebb járható ösvényt."
 BLOCKED_THOUGHT_TEXT = "Valahogy át kellene jutnom..."
-BUSH_COLLAPSE_TEXT = "Néha csak egy apróságon múlik az egész."
+BUSH_COLLAPSE_TEXT = "Egy apróságon múlt az egész."
 LAKE_TEXT = "Hinnünk kell magunkban..."
-LAKE_SOLVED_TEXT = "Mindig is bennem volt..."
-WINDOW_TITLE = "Little Wolf Journey"
+LAKE_SOLVED_TEXT = "... és nem lesznek akadályok."
+WINDOW_TITLE = "Farkas kaland"
 
 OBSTACLE_CAMERA_REVEAL_SPEED = 230.0
 OBSTACLE_CAMERA_REVEAL_EPSILON = 1.0
@@ -59,6 +59,28 @@ LAKE_HOLD_DECAY = 2.0  # gyors visszaesés ha elengedik
 LAKE_WORLD_X = 5500
 LAKE_BLOCK_EPSILON = 0.5  # float-pontosság a "blokkolva van" detektáláshoz
 
+LOG_CHALLENGE_WORLD_X = 7400  # harmadik kihívás triggerpontja, a tó után
+LOG_WARNING_TEXT = "Veszélyt érzek!"
+GAME_OVER_TEXT = "Játék vége! A farönk elsodort."
+LOG_SPEED = 390.0
+LOG_RADIUS_BASE = 44
+LOG_COLLISION_PADDING_X = 10
+LOG_SAFE_CLEARANCE_EXTRA = 16
+# A harmadik kihívás nézetváltása lassan, finoman közelítse a farkast középre.
+# Kisebb érték = lassabb/selymesebb átmenet.
+LOG_CAMERA_CENTER_SMOOTHNESS = 2.6
+LOG_CAMERA_CENTER_EPSILON = 0.75
+
+DARK_CHALLENGE_WORLD_X = 8350  # negyedik kihívás triggerpontja, a farönk után
+DARKNESS_HINT_TEXT = "E jelben győzni fogsz"
+DARKNESS_MAX_ALPHA = 255
+DARKNESS_FADE_IN_SPEED = 320.0
+DARKNESS_FADE_OUT_SPEED = 430.0
+SPOTLIGHT_RADIUS_BASE = 46
+CROSS_GESTURE_MIN_SPAN_BASE = 145
+CROSS_GESTURE_TOLERANCE_BASE = 18
+CROSS_GESTURE_MIN_POINTS = 18
+
 MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
 
@@ -68,7 +90,10 @@ class WorldConfig:
         self.height = height
         self.center_x = width // 2
         self.left_frame_x = max(55, int(width * 0.075))
-        self.right_edge_x = int(width * 0.82)
+        # Jobbra haladásnál korábban kezdjen tolódni a pálya, hogy több tér
+        # látszódjon a farkas előtt. Régebben 0.82 volt, emiatt a kamera csak
+        # akkor indult, amikor a játékos már túl közel volt a képernyő jobb széléhez.
+        self.right_edge_x = int(width * 0.64)
         # Magasabb érték -> kisebb steady-state lemaradás a játékos mögött.
         # 9.0 esetén lag = v_player / 9.0 = 300/9 ≈ 33 px (4.8-nál még 62 px volt).
         self.camera_smoothness = 9.0
@@ -356,15 +381,18 @@ class DialogueBox:
         self.config = config
         self.active = False
         self.text = ""
+        self.hint_text = "Enter - tovább"
         self.font = pygame.font.SysFont("arial", max(26, int(config.height * 0.036)))
         self.hint_font = pygame.font.SysFont("arial", max(18, int(config.height * 0.024)))
 
-    def show(self, text: str) -> None:
+    def show(self, text: str, hint_text: str = "Enter - tovább") -> None:
         self.text = text
+        self.hint_text = hint_text
         self.active = True
 
     def hide(self) -> None:
         self.active = False
+        self.hint_text = "Enter - tovább"
 
     def draw(self, screen: pygame.Surface) -> None:
         if not self.active:
@@ -375,7 +403,7 @@ class DialogueBox:
         line_spacing = max(8, int(self.config.height * 0.012))
         lines = wrap_text(self.text, self.font, box_width - padding_x * 2)
         rendered = [self.font.render(line, True, (234, 235, 255)) for line in lines]
-        hint = self.hint_font.render("Enter - tovább", True, (176, 198, 245))
+        hint = self.hint_font.render(self.hint_text, True, (176, 198, 245))
         text_h = sum(s.get_height() for s in rendered) + max(0, len(rendered) - 1) * line_spacing
         box_height = padding_y * 2 + text_h + hint.get_height() + line_spacing + 10
         box_rect = pygame.Rect(0, 0, box_width, box_height)
@@ -437,8 +465,15 @@ class ThoughtBubble:
         surf.blit(text_surf, (bubble_x + padding_x, padding_y))
         self._cached_bubble = surf
 
-    def show(self) -> None:
-        """A megjelenítés "kérése" - minden hívás újraindítja a látható időt."""
+    def show(self, text: str | None = None) -> None:
+        """A megjelenítés "kérése" - minden hívás újraindítja a látható időt.
+
+        A harmadik kihívás ugyanazt a buborék-komponenst használja, csak más
+        szöveggel, ezért opcionálisan átépítjük a cache-elt buborékot.
+        """
+        if text is not None and text != self.text:
+            self.text = text
+            self._build_bubble()
         self.target_alpha = 1.0
         self.visible_timer = THOUGHT_BUBBLE_VISIBLE_TIME
 
@@ -753,6 +788,353 @@ class WillpowerIndicator:
         screen.blit(bar, bar_rect)
 
 
+
+class RollingLog:
+    """Harmadik akadály: a képernyő jobb széléről beguruló farönk."""
+
+    def __init__(self, ground_y: int, scale: float = 1.0) -> None:
+        self.ground_y = ground_y
+        self.radius = int(LOG_RADIUS_BASE * scale)
+        self.collision_radius = max(18, int(self.radius * 0.82))
+        self.speed = LOG_SPEED * max(0.92, min(1.18, scale))
+        self.world_x = 0.0
+        self.active = False
+        self.solved = False
+        self.rotation_degrees = 0.0
+        self.surface = self._create_surface()
+
+    def _create_surface(self) -> pygame.Surface:
+        size = self.radius * 2 + 10
+        center = size // 2
+        s = pygame.Surface((size, size), pygame.SRCALPHA)
+        bark_dark = (62, 35, 20)
+        bark_mid = (118, 72, 37)
+        bark_light = (173, 113, 56)
+        ring = (226, 174, 92)
+        ring_dark = (113, 67, 34)
+        shadow = (20, 12, 24, 85)
+
+        pygame.draw.circle(s, shadow, (center + 3, center + 4), self.radius)
+        pygame.draw.circle(s, bark_dark, (center, center), self.radius)
+        pygame.draw.circle(s, bark_mid, (center, center), self.radius - 4)
+        pygame.draw.circle(s, ring, (center, center), self.radius - 13)
+        pygame.draw.circle(s, ring_dark, (center, center), self.radius - 13, 3)
+        for inset in (22, 31):
+            rr = max(4, self.radius - inset)
+            pygame.draw.circle(s, ring_dark, (center, center), rr, 2)
+        # Repedések / kéregvonalak - ezek miatt forgás közben látszik a mozgás.
+        for angle_deg, length_mul in ((18, 0.66), (108, 0.55), (212, 0.70), (296, 0.52)):
+            a = math.radians(angle_deg)
+            start = (center + int(math.cos(a) * self.radius * 0.18),
+                     center + int(math.sin(a) * self.radius * 0.18))
+            end = (center + int(math.cos(a) * self.radius * length_mul),
+                   center + int(math.sin(a) * self.radius * length_mul))
+            pygame.draw.line(s, ring_dark, start, end, 3)
+        for y_off in (-self.radius // 2, -self.radius // 5, self.radius // 4):
+            pygame.draw.arc(s, bark_light,
+                            (center - self.radius + 7, center + y_off - 8, self.radius * 2 - 14, 18),
+                            0.1, math.pi - 0.1, 3)
+        pygame.draw.circle(s, (255, 220, 132, 80), (center - self.radius // 3, center - self.radius // 3), 6)
+        return s
+
+    @property
+    def center_y(self) -> float:
+        return self.ground_y - self.radius + 4
+
+    @property
+    def top_y(self) -> float:
+        return self.center_y - self.collision_radius
+
+    def spawn_from_screen_right(self, camera_x: float, screen_width: int) -> None:
+        self.world_x = camera_x + screen_width + self.radius + 34
+        self.active = True
+        self.solved = False
+        self.rotation_degrees = 0.0
+
+    def update(self, dt: float, camera_x: float) -> None:
+        if not self.active:
+            return
+        self.world_x -= self.speed * dt
+        # Fizikailag a gördülés szöge út/r sugár; fokban tároljuk a pygame.rotate-hoz.
+        self.rotation_degrees = (self.rotation_degrees - math.degrees(self.speed * dt / max(1, self.radius))) % 360
+        if self.world_x < camera_x - self.radius - 90:
+            self.active = False
+            self.solved = True
+
+    def collides_with_player(self, player: Player) -> bool:
+        if not self.active:
+            return False
+        horizontal_overlap = abs(player.world_x - self.world_x) <= (
+            self.collision_radius + player.collision_half_width + LOG_COLLISION_PADDING_X
+        )
+        if not horizontal_overlap:
+            return False
+        # A farkas midbottom Y-koordinátája akkor biztonságos, ha már a farönk
+        # teteje fölé emelkedett. Így nem elég csak megnyomni az ugrást: időzíteni kell.
+        return player.y > self.top_y + LOG_SAFE_CLEARANCE_EXTRA
+
+    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+        if not self.active:
+            return
+        screen_x = round(self.world_x - camera_x)
+        rotated = pygame.transform.rotate(self.surface, self.rotation_degrees)
+        rect = rotated.get_rect(center=(screen_x, round(self.center_y)))
+        shadow_rect = pygame.Rect(0, 0, int(self.radius * 1.7), max(7, int(self.radius * 0.28)))
+        shadow_rect.center = (screen_x, self.ground_y + 8)
+        pygame.draw.ellipse(screen, (31, 22, 54), shadow_rect)
+        screen.blit(rotated, rect)
+
+
+class DarknessSignChallenge:
+    """Negyedik kihívás: sötétség, kurzor-fény és egy mozdulattal rajzolt kereszt."""
+
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.active = False
+        self.solved = False
+        self.finished = False
+        self.alpha = 0.0
+        self.drawing = False
+        self.points: list[tuple[int, int]] = []
+        scale = max(0.85, min(1.25, config.height / 700))
+        self.spotlight_radius = int(SPOTLIGHT_RADIUS_BASE * scale)
+        self.min_span = int(CROSS_GESTURE_MIN_SPAN_BASE * scale)
+        self.tolerance = int(CROSS_GESTURE_TOLERANCE_BASE * scale)
+
+    def start(self) -> None:
+        self.active = True
+        self.solved = False
+        self.finished = False
+        self.alpha = 0.0
+        self.drawing = False
+        self.points.clear()
+
+    def is_visible(self) -> bool:
+        return self.active and (self.alpha > 1.0 or not self.finished)
+
+    def blocks_controls(self) -> bool:
+        # A játékos addig maradjon megállítva, amíg a sötétség teljesen ki nem halványul.
+        return self.active and not self.finished
+
+    def update(self, dt: float) -> None:
+        if not self.active:
+            return
+        target = 0.0 if self.solved else float(DARKNESS_MAX_ALPHA)
+        speed = DARKNESS_FADE_OUT_SPEED if self.solved else DARKNESS_FADE_IN_SPEED
+        if self.alpha < target:
+            self.alpha = min(target, self.alpha + speed * dt)
+        elif self.alpha > target:
+            self.alpha = max(target, self.alpha - speed * dt)
+        if self.solved and self.alpha <= 0.5:
+            self.alpha = 0.0
+            self.active = False
+            self.finished = True
+            self.points.clear()
+
+    def begin_stroke(self, pos: tuple[int, int]) -> None:
+        if not self.active or self.solved:
+            return
+        self.drawing = True
+        self.points = [pos]
+
+    def add_point(self, pos: tuple[int, int]) -> bool:
+        if not self.active or self.solved or not self.drawing:
+            return False
+        if not self.points:
+            self.points.append(pos)
+        else:
+            last_x, last_y = self.points[-1]
+            dx = pos[0] - last_x
+            dy = pos[1] - last_y
+            if dx * dx + dy * dy >= 9:  # legalább 3 px mozgás; kis remegést kiszűr
+                self.points.append(pos)
+        # Ne nőjön végtelenre a lista, de maradjon elég pont a teljes mozdulathoz.
+        if len(self.points) > 260:
+            self.points = self.points[-260:]
+        if self._looks_like_cross(self.points):
+            self.solve()
+            return True
+        return False
+
+    def end_stroke(self) -> bool:
+        if not self.active or self.solved:
+            self.drawing = False
+            return False
+        solved_now = self._looks_like_cross(self.points)
+        if solved_now:
+            self.solve()
+        else:
+            self.drawing = False
+            # Ha nem sikerült, kezdhesse újra egyetlen friss mozdulattal.
+            self.points.clear()
+        return solved_now
+
+    def solve(self) -> None:
+        if self.solved:
+            return
+        self.solved = True
+        self.drawing = False
+
+    def _looks_like_cross(self, points: list[tuple[int, int]]) -> bool:
+        """Szigorúbb + alakú kereszt-felismerés.
+
+        A korábbi verzió túl engedékeny volt: már néhány szélső pontból vagy
+        X-szerű firkából is megoldódhatott. Itt csak akkor fogadjuk el a jelet,
+        ha a teljes mozdulat nagy része két, egymást középen metsző, közel
+        vízszintes és közel függőleges sávban halad.
+        """
+        if len(points) < CROSS_GESTURE_MIN_POINTS:
+            return False
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span_x = max_x - min_x
+        span_y = max_y - min_y
+        if span_x < self.min_span or span_y < self.min_span:
+            return False
+
+        # A klasszikus + kereszt legyen viszonylag arányos; ne lehessen egy
+        # hosszú vonalra kis kampóval megoldani.
+        aspect = span_x / max(1, span_y)
+        if aspect < 0.72 or aspect > 1.38:
+            return False
+
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        return self._looks_like_plus(points, cx, cy, span_x, span_y)
+
+    def _looks_like_plus(self, points: list[tuple[int, int]], cx: float, cy: float,
+                         span_x: float, span_y: float) -> bool:
+        # Jóval kisebb tolerancia: csak a középvonalak közelében húzott mozdulat
+        # számít. A magasságfüggő alapértékhez képest sem engedjük túl nagyra nőni.
+        tol = max(10.0, min(float(self.tolerance), min(span_x, span_y) * 0.095))
+        center_tol = max(12.0, min(span_x, span_y) * 0.075)
+        arm_x = span_x * 0.39
+        arm_y = span_y * 0.39
+
+        left = right = top = bottom = False
+        center_hits = 0
+        horizontal_points = 0
+        vertical_points = 0
+        corner_points = 0
+
+        for x, y in points:
+            near_h = abs(y - cy) <= tol
+            near_v = abs(x - cx) <= tol
+            if near_h:
+                horizontal_points += 1
+            if near_v:
+                vertical_points += 1
+            if near_h and x <= cx - arm_x:
+                left = True
+            if near_h and x >= cx + arm_x:
+                right = True
+            if near_v and y <= cy - arm_y:
+                top = True
+            if near_v and y >= cy + arm_y:
+                bottom = True
+            if abs(x - cx) <= center_tol and abs(y - cy) <= center_tol:
+                center_hits += 1
+            # Távoli sarokpontok tipikusan X-et, kört vagy firkát jeleznek.
+            if abs(x - cx) > tol * 1.7 and abs(y - cy) > tol * 1.7:
+                corner_points += 1
+
+        if not (left and right and top and bottom):
+            return False
+        if center_hits < 3:
+            return False
+        if horizontal_points < len(points) * 0.24 or vertical_points < len(points) * 0.24:
+            return False
+        if corner_points > len(points) * 0.16:
+            return False
+
+        # A teljes út hosszának nagy része a vízszintes vagy függőleges sávban
+        # legyen. Ez kizárja az átlós X-et és a nagy, pontatlan kanyarokat.
+        total_len = 0.0
+        axis_aligned_len = 0.0
+        horizontal_len = 0.0
+        vertical_len = 0.0
+        center_crossings = 0
+        for (x1, y1), (x2, y2) in zip(points, points[1:]):
+            dx = x2 - x1
+            dy = y2 - y1
+            seg_len = math.hypot(dx, dy)
+            if seg_len <= 0.01:
+                continue
+            total_len += seg_len
+            mx = (x1 + x2) / 2.0
+            my = (y1 + y2) / 2.0
+            near_h = abs(my - cy) <= tol
+            near_v = abs(mx - cx) <= tol
+            if near_h or near_v:
+                axis_aligned_len += seg_len
+            if near_h:
+                horizontal_len += seg_len
+            if near_v:
+                vertical_len += seg_len
+            if abs(mx - cx) <= center_tol and abs(my - cy) <= center_tol:
+                center_crossings += 1
+
+        if total_len < self.min_span * 1.65:
+            return False
+        if axis_aligned_len / total_len < 0.82:
+            return False
+        if horizontal_len / total_len < 0.24 or vertical_len / total_len < 0.24:
+            return False
+        if center_crossings < 2:
+            return False
+
+        return True
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        """True-val tér vissza, ha az esemény megoldotta a kihívást."""
+        if not self.active or self.solved:
+            return False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # Kattintással mindig tiszta, új egy-mozdulatú rajz indul.
+            self.begin_stroke(event.pos)
+        elif event.type == pygame.MOUSEMOTION:
+            # Nem kötelező kattintani: ha a játékos csak a kurzorral rajzolja meg
+            # a jelet, azt is egy folyamatos mozdulatként kezeljük.
+            if not self.drawing:
+                self.begin_stroke(event.pos)
+            return self.add_point(event.pos)
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            return self.end_stroke()
+        return False
+
+    def draw_trace(self, screen: pygame.Surface) -> None:
+        # A rajzolt jel a sötét overlay ALÁ kerül; így igazán csak a kurzor fénye alatt látszik.
+        if not self.active or len(self.points) < 2 or self.alpha <= 8:
+            return
+        trace = pygame.Surface((self.config.width, self.config.height), pygame.SRCALPHA)
+        line_width = max(3, int(self.config.height * 0.006))
+        pygame.draw.lines(trace, (235, 242, 255, 135), False, self.points, line_width)
+        for point in self.points[-5:]:
+            pygame.draw.circle(trace, (245, 248, 255, 90), point, line_width + 2)
+        screen.blit(trace, (0, 0))
+
+    def draw_darkness(self, screen: pygame.Surface, mouse_pos: tuple[int, int]) -> None:
+        if not self.active or self.alpha <= 0.5:
+            return
+        base_alpha = int(max(0, min(DARKNESS_MAX_ALPHA, self.alpha)))
+        overlay = pygame.Surface((self.config.width, self.config.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, base_alpha))
+        mx, my = mouse_pos
+        r = self.spotlight_radius
+        # Puha peremű fénykör: kívül majdnem fekete, középen teljesen átlátszó.
+        for radius, alpha_mul in (
+            (int(r * 1.45), 0.92),
+            (int(r * 1.25), 0.76),
+            (int(r * 1.08), 0.48),
+            (r, 0.0),
+        ):
+            pygame.draw.circle(overlay, (0, 0, 0, int(base_alpha * alpha_mul)), (mx, my), radius)
+        screen.blit(overlay, (0, 0))
+
+
 class Player:
     def __init__(self, config: WorldConfig) -> None:
         self.config = config
@@ -924,6 +1306,8 @@ class Game:
         self.lake = Lake(world_x=LAKE_WORLD_X, ground_y=self.config.ground_top_y,
                          screen_height=self.config.height, scale=scale)
         self.willpower = WillpowerIndicator(self.config)
+        self.rolling_log = RollingLog(ground_y=self.config.ground_top_y, scale=scale)
+        self.dark_challenge = DarknessSignChallenge(self.config)
         self.camera_x = 0.0
         self.cinematic_camera_active = False
         self.cinematic_camera_target_x = 0.0
@@ -935,6 +1319,15 @@ class Game:
         self.lake_event_triggered = False
         self.lake_solved = False
         self.lake_hold_timer = 0.0  # 0..LAKE_HOLD_DURATION
+        # Farönk akadály állapotai
+        self.log_event_triggered = False
+        self.log_solved = False
+        self.log_camera_transition_active = False
+        self.log_camera_transition_target_x = 0.0
+        # Sötétség / kereszt akadály állapotai
+        self.dark_event_triggered = False
+        self.dark_solved = False
+        self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         # Cache-elt help szöveg - nem változik, nem kell minden frame újra-renderelni.
         self._help_surface: pygame.Surface | None = None
@@ -952,7 +1345,13 @@ class Game:
         self._help_bg = bg
 
     def controls_enabled(self) -> bool:
-        return not self.dialogue.active and not self.cinematic_camera_active
+        return (
+            not self.game_over
+            and not self.dialogue.active
+            and not self.cinematic_camera_active
+            and not self.log_camera_transition_active
+            and not self.dark_challenge.blocks_controls()
+        )
 
     def movement_blocked(self) -> bool:
         """Teljes mozgás-tiltás csak a bozót akadálynál van. A tó NEM tiltja
@@ -975,15 +1374,26 @@ class Game:
         block_x = self.lake.left_edge - self.player.collision_half_width
         return abs(self.player.world_x - block_x) < LAKE_BLOCK_EPSILON
 
-    def start_obstacle_reveal(self, obstacle_left_edge: float, stop_distance: float, text: str) -> None:
-        """Közös, újrahasználható akadály-megjelenítés minden nagy akadályhoz."""
-        self.player.world_x = obstacle_left_edge - stop_distance
+    def start_obstacle_reveal(self, obstacle_left_edge: float, stop_distance: float, text: str,
+                              *, preserve_player_position: bool = False,
+                              target_player_screen_x: int | None = None) -> None:
+        """Közös, újrahasználható akadály-megjelenítés minden nagy akadályhoz.
+
+        A tónál már nem teleportáljuk előre a farkast a régi bal oldali reveal
+        pozícióba, mert a korábbi kamerakövetéssel ez rángatósnak hatott. Ott
+        a játékos marad a helyén, és csak a kamera úszik át egy olyan nézetre,
+        ahol a tó jól látszik előtte.
+        """
+        if not preserve_player_position:
+            self.player.world_x = obstacle_left_edge - stop_distance
         self.player.vx = 0.0
         self.player.movement_pressed = False
         self.player.was_movement_pressed = False
         self.player.start_animation("idle")
         self.cinematic_camera_active = True
-        self.cinematic_camera_target_x = max(0.0, self.player.world_x - self.config.left_frame_x)
+        if target_player_screen_x is None:
+            target_player_screen_x = self.config.left_frame_x
+        self.cinematic_camera_target_x = max(0.0, self.player.world_x - target_player_screen_x)
         self.pending_obstacle_text = text
         if self.dialogue.active:
             self.dialogue.hide()
@@ -994,7 +1404,56 @@ class Game:
 
     def trigger_lake_event(self) -> None:
         self.lake_event_triggered = True
-        self.start_obstacle_reveal(self.lake.left_edge, self.lake.stop_distance, LAKE_TEXT)
+        # A korábbi, jobban előre néző kamera mellett a régi tó-reveal túl nagy
+        # átrendezést okozott. A farkas marad a triggerpontján, a kamera pedig
+        # kb. a képernyő 30%-ára úsztatja, így a tó már látszik, de nincs rángás.
+        self.start_obstacle_reveal(
+            self.lake.left_edge,
+            self.lake.stop_distance,
+            LAKE_TEXT,
+            preserve_player_position=True,
+            target_player_screen_x=int(self.config.width * 0.30),
+        )
+
+    def centered_camera_x_for_player(self) -> float:
+        """Kameraállás, ahol a farkas vízszintesen középen látszik."""
+        return max(0.0, self.player.world_x - self.config.center_x)
+
+    def trigger_log_event(self) -> None:
+        self.log_event_triggered = True
+        # A veszélyjelzésnél nézetet váltunk: a farkas középre kerül.
+        # Nem vágunk azonnal a célkamerára, hanem külön, lassabb átmenettel
+        # közelítünk rá, hogy ne "rántson" a kép. A farönk csak akkor spawnol,
+        # amikor a kamera már beállt erre az új kompozícióra.
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.was_movement_pressed = False
+        self.player.start_animation("idle")
+        self.log_camera_transition_target_x = self.centered_camera_x_for_player()
+        self.log_camera_transition_active = True
+        self.thought_bubble.show(LOG_WARNING_TEXT)
+
+    def trigger_dark_event(self) -> None:
+        self.dark_event_triggered = True
+        self.dark_solved = False
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.was_movement_pressed = False
+        self.player.start_animation("idle")
+        self.dark_challenge.start()
+        self.thought_bubble.show(DARKNESS_HINT_TEXT)
+        if self.dialogue.active:
+            self.dialogue.hide()
+
+    def set_game_over(self) -> None:
+        if self.game_over:
+            return
+        self.game_over = True
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.start_animation("idle")
+        self.thought_bubble.hide_immediately()
+        self.dialogue.show(GAME_OVER_TEXT, hint_text="Esc - kilépés")
 
     def update_cinematic_camera(self, dt: float) -> bool:
         if not self.cinematic_camera_active:
@@ -1011,10 +1470,41 @@ class Game:
             self.camera_x += math.copysign(step, distance)
         return True
 
+    def update_log_camera_transition(self, dt: float) -> bool:
+        """Finom kameraátmenet a harmadik kihívás elején.
+
+        A normál kamerakövetés 9.0-s smoothness-szel dolgozik, ami jó játék közben,
+        de nézetváltásnál túl hirtelennek érződik. Itt külön, lassabb értékkel
+        ease-out módon közelítjük a célpozíciót.
+        """
+        if not self.log_camera_transition_active:
+            return False
+        target_camera_x = self.log_camera_transition_target_x
+        distance = target_camera_x - self.camera_x
+        if abs(distance) <= LOG_CAMERA_CENTER_EPSILON:
+            self.camera_x = target_camera_x
+            self.log_camera_transition_active = False
+            self.rolling_log.spawn_from_screen_right(self.camera_x, self.config.width)
+            return True
+
+        smooth_factor = 1.0 - math.exp(-LOG_CAMERA_CENTER_SMOOTHNESS * dt)
+        self.camera_x += distance * smooth_factor
+        return True
+
     def update_camera(self, dt: float) -> None:
         if self.update_cinematic_camera(dt):
             return
+        if self.update_log_camera_transition(dt):
+            return
         if self.dialogue.active:
+            return
+        if self.log_event_triggered and not self.log_solved and not self.game_over:
+            # A harmadik kihívás alatt a kamera a farkast tartja középen,
+            # hogy a jobbról érkező farönk jól látható legyen. Ez már a
+            # beállt kamera utáni követés, ezért maradhat fürgébb.
+            target_camera_x = self.centered_camera_x_for_player()
+            smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
+            self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
             return
         screen_x = self.player.world_x - self.camera_x
         target_camera_x = self.camera_x
@@ -1058,7 +1548,11 @@ class Game:
         self.background.draw_ground(self.screen, self.camera_x)
         # Tó a ground UTÁN, hogy lefedje a vízfelszín alatti talajt.
         self.lake.draw(self.screen, self.camera_x)
+        self.rolling_log.draw(self.screen, self.camera_x)
         self.player.draw(self.screen, self.camera_x)
+        if self.dark_challenge.is_visible():
+            self.dark_challenge.draw_trace(self.screen)
+            self.dark_challenge.draw_darkness(self.screen, pygame.mouse.get_pos())
         # Vizuális overlay-k a játékos feje fölött:
         player_screen_x = round(self.player.world_x - self.camera_x)
         player_top_y = round(self.player.y) - SPRITE_HEIGHT
@@ -1070,7 +1564,8 @@ class Game:
         if self.lake_event_triggered and not self.lake_solved:
             wp_anchor = (player_screen_x, player_top_y - 18)
             self.willpower.draw(self.screen, wp_anchor)
-        self.draw_help()
+        if not self.dark_challenge.is_visible():
+            self.draw_help()
         self.dialogue.draw(self.screen)
         pygame.display.flip()
 
@@ -1084,23 +1579,34 @@ class Game:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.running = False
-                    elif event.key == pygame.K_RETURN and self.dialogue.active:
+                    elif event.key == pygame.K_RETURN and self.dialogue.active and not self.game_over:
                         self.dialogue.hide()
-                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    self.handle_mouse_click(event.pos)
+                elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
+                    if self.dark_challenge.handle_event(event):
+                        self.dark_solved = True
+                        self.thought_bubble.hide_immediately()
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        self.handle_mouse_click(event.pos)
 
             # Akadály-trigger ellenőrzés: csak az aktuálisan releváns akadály.
-            if not self.bush_event_triggered and self.player.world_x >= self.bush.trigger_x():
-                self.trigger_bush_event()
-            elif (self.bush_solved and not self.lake_event_triggered
-                  and self.player.world_x >= self.lake.trigger_x()):
-                self.trigger_lake_event()
+            if not self.game_over:
+                if not self.bush_event_triggered and self.player.world_x >= self.bush.trigger_x():
+                    self.trigger_bush_event()
+                elif (self.bush_solved and not self.lake_event_triggered
+                      and self.player.world_x >= self.lake.trigger_x()):
+                    self.trigger_lake_event()
+                elif (self.lake_solved and not self.log_event_triggered
+                      and self.player.world_x >= LOG_CHALLENGE_WORLD_X):
+                    self.trigger_log_event()
+                elif (self.log_solved and not self.dark_event_triggered
+                      and self.player.world_x >= DARK_CHALLENGE_WORLD_X):
+                    self.trigger_dark_event()
 
             blocked = self.movement_blocked()
             self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled(), blocked)
             # Bozót: gondolatfelhő ha próbálkozik mozogni.
             if blocked and self.player.tried_to_move and not self.dialogue.active:
-                self.thought_bubble.show()
+                self.thought_bubble.show(BLOCKED_THOUGHT_TEXT)
 
             # Tó: csökönyös jobbra-nyomás számolása.
             self._update_lake_hold(dt)
@@ -1109,6 +1615,16 @@ class Game:
             self.player.update_animation(dt)
             self.bush.update(dt)
             self.lake.update(dt)
+            self.rolling_log.update(dt, self.camera_x)
+            if self.rolling_log.active and self.rolling_log.collides_with_player(self.player):
+                self.set_game_over()
+            if self.rolling_log.solved:
+                self.log_solved = True
+            self.dark_challenge.update(dt)
+            if self.dark_challenge.active and not self.dark_challenge.solved:
+                self.thought_bubble.show(DARKNESS_HINT_TEXT)
+            if self.dark_challenge.solved:
+                self.dark_solved = True
             self.thought_bubble.update(dt)
             # A willpower-sáv csak akkor "él", ha aktív tó-akadály van.
             wp_target = (self.lake_hold_timer / LAKE_HOLD_DURATION
