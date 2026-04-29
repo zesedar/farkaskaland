@@ -40,16 +40,25 @@ INTRO_TEXT = "Valami azt súgja nekem meg kell találnom a békémet..."
 THORN_TEXT = "Néha csak úgy juthatunk tovább, ha megtaláljuk a legszűkebb járható ösvényt."
 BLOCKED_THOUGHT_TEXT = "Valahogy át kellene jutnom..."
 BUSH_COLLAPSE_TEXT = "Néha csak egy apróságon múlik az egész."
+LAKE_TEXT = "Hinnünk kell magunkban..."
+LAKE_SOLVED_TEXT = "Mindig is bennem volt..."
 WINDOW_TITLE = "Little Wolf Journey"
 
 OBSTACLE_CAMERA_REVEAL_SPEED = 230.0
 OBSTACLE_CAMERA_REVEAL_EPSILON = 1.0
 
-WEAK_SPOT_RADIUS = 18  # mekkora körön belül érzékeny a bozót gyenge pontja
+WEAK_SPOT_RADIUS = 2  # 2 px sugár a hit-detectionhez (kihívásnak szánt)
 WEAK_SPOT_MIN_ALPHA = 110  # csak elég látható pixel lehet weak spot
+WEAK_SPOT_MARKER_COLOR = (220, 30, 30, 255)  # 2x2 piros marker a bozóton
 BUSH_COLLAPSE_RATE = 1.4  # 1/sec - kb. 0.7s teljes összeomlás
 THOUGHT_BUBBLE_FADE_SPEED = 5.0
 THOUGHT_BUBBLE_VISIBLE_TIME = 1.6
+
+LAKE_HOLD_DURATION = 5.0  # másodperc - meddig kell csökönyösen jobbra nyomni
+LAKE_HOLD_DECAY = 2.0  # gyors visszaesés ha elengedik
+LAKE_WORLD_X = 5500
+LAKE_BLOCK_EPSILON = 0.5  # float-pontosság a "blokkolva van" detektáláshoz
+
 MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
 
@@ -405,19 +414,27 @@ class ThoughtBubble:
         padding_x, padding_y = 22, 14
         bubble_w = text_surf.get_width() + padding_x * 2
         bubble_h = text_surf.get_height() + padding_y * 2
-        tail_extra = 56  # plusz hely a tail-felhőknek a buborék alatt
-        surf = pygame.Surface((bubble_w, bubble_h + tail_extra), pygame.SRCALPHA)
+        # Bal padding: hely a tail-felhőcskéknek, hogy a buborék MAGA jobbra
+        # legyen az anchor ponttól, és csak a tail nyúljon balra a farkas felé.
+        left_pad = 30
+        bottom_pad = 56
+        surf_w = bubble_w + left_pad
+        surf_h = bubble_h + bottom_pad
+        surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
         fill = (245, 248, 255)
         border = (140, 152, 210)
-        # Tail: 3 csökkenő sugarú felhőcske, ferdén lefelé a játékos felé
-        cx_anchor = bubble_w // 2 - 14
-        for cx_off, cy_off, r in [(0, bubble_h + 12, 12), (-16, bubble_h + 26, 8), (-26, bubble_h + 38, 5)]:
-            pygame.draw.circle(surf, border, (cx_anchor + cx_off, cy_off), r)
-            pygame.draw.circle(surf, fill, (cx_anchor + cx_off, cy_off), r - 2)
+        # Fő buborék: az x=left_pad-tól indul, így az ANCHOR ponttól jobbra van.
+        bubble_x = left_pad
+        # Tail: a buborék bal-alsó sarkából INDUL és LEFELÉ-BALRA tart, belóg
+        # a left_pad területbe. Így vizuálisan visszamutat a farkas feje felé.
+        for cx_off, cy_off, r in [(20, bubble_h + 8, 11), (2, bubble_h + 22, 7), (-14, bubble_h + 36, 4)]:
+            cx = bubble_x + cx_off
+            pygame.draw.circle(surf, border, (cx, cy_off), r)
+            pygame.draw.circle(surf, fill, (cx, cy_off), r - 2)
         # Fő buborék
-        pygame.draw.rect(surf, fill, (0, 0, bubble_w, bubble_h), border_radius=20)
-        pygame.draw.rect(surf, border, (0, 0, bubble_w, bubble_h), 2, border_radius=20)
-        surf.blit(text_surf, (padding_x, padding_y))
+        pygame.draw.rect(surf, fill, (bubble_x, 0, bubble_w, bubble_h), border_radius=20)
+        pygame.draw.rect(surf, border, (bubble_x, 0, bubble_w, bubble_h), 2, border_radius=20)
+        surf.blit(text_surf, (bubble_x + padding_x, padding_y))
         self._cached_bubble = surf
 
     def show(self) -> None:
@@ -447,7 +464,10 @@ class ThoughtBubble:
             return
         bubble = self._cached_bubble
         bubble.set_alpha(int(255 * self.alpha))
-        bubble_rect = bubble.get_rect(midbottom=(anchor_screen_pos[0], anchor_screen_pos[1] - 8))
+        # bottomleft anchor: a surface bal-alsó sarka az anchor ponton.
+        # A buborék maga jobbra van (left_pad miatt), a tail balra-felfelé
+        # mutat vissza a farkas feje felé. Bal oldalon NEM lóg ki túl a szegélyen.
+        bubble_rect = bubble.get_rect(bottomleft=anchor_screen_pos)
         screen.blit(bubble, bubble_rect)
 
 
@@ -503,7 +523,8 @@ class ThornBush:
         return surface
 
     def _choose_weak_spot(self) -> tuple[int, int] | None:
-        """Random pixel a bozót látható területén belül, ami a hatékony találati pont."""
+        """Random pixel a bozót látható területén belül, ami a hatékony találati pont.
+        Egyúttal felfest egy 2x2 piros markert ezen a helyen, hogy a játékos LÁSSA."""
         rng = random.Random()  # nem deterministic - minden játékindításnál más
         width, height = self.surface.get_size()
         candidates: list[tuple[int, int]] = []
@@ -520,8 +541,24 @@ class ThornBush:
         finally:
             self.surface.unlock()
         if not candidates:
-            return (width // 2, int(height * 0.6))
-        return rng.choice(candidates)
+            spot = (width // 2, int(height * 0.6))
+        else:
+            spot = rng.choice(candidates)
+        # 2x2 piros marker rákerül a bozót textúrájára - ez a vizuális hint.
+        self._paint_weak_spot_marker(spot)
+        return spot
+
+    def _paint_weak_spot_marker(self, pos: tuple[int, int]) -> None:
+        x, y = pos
+        width, height = self.surface.get_size()
+        self.surface.lock()
+        try:
+            for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                px, py = x + dx, y + dy
+                if 0 <= px < width and 0 <= py < height:
+                    self.surface.set_at((px, py), WEAK_SPOT_MARKER_COLOR)
+        finally:
+            self.surface.unlock()
 
     @property
     def left_edge(self) -> float:
@@ -531,15 +568,14 @@ class ThornBush:
         return self.left_edge - self.trigger_distance
 
     def weak_spot_world_pos(self) -> tuple[float, float] | None:
-        """A weak spot világkoordinátái (a bozót draw-jával konzisztensen)."""
+        """A weak spot világkoordinátái (a 2x2 marker GEOMETRIAI KÖZEPE)."""
         if self.weak_spot_local is None:
             return None
         sx, sy = self.weak_spot_local
         height = self.surface.get_height()
-        # A surface bottomleft = (world_x, ground_y + 18) - lásd draw().
-        # Tehát surface (0,0) világkoordinátában: (world_x, ground_y + 18 - height)
-        wx = self.world_x + sx
-        wy = self.ground_y + 18 - height + sy
+        # +0.5 offset: a 2x2 marker pixelei (sx,sy)..(sx+1,sy+1), közepe (sx+0.5, sy+0.5).
+        wx = self.world_x + sx + 0.5
+        wy = self.ground_y + 18 - height + sy + 0.5
         return (wx, wy)
 
     def is_weak_spot_hit(self, world_x: float, world_y: float, radius: float = WEAK_SPOT_RADIUS) -> bool:
@@ -584,6 +620,137 @@ class ThornBush:
             screen.blit(scaled, scaled_rect)
         else:
             screen.blit(self.surface, rect)
+
+
+class Lake:
+    """Második akadály: víz, amit csak kitartással lehet átlépni."""
+
+    def __init__(self, world_x: float, ground_y: int, screen_height: int, scale: float = 1.0) -> None:
+        self.world_x = world_x
+        self.ground_y = ground_y
+        self.screen_height = screen_height
+        self.trigger_distance = 460
+        self.stop_distance = 280
+        self.solved = False
+        self.water_anim_t = 0.0
+        self.scale = scale
+        self.width = int(620 * scale)
+        # A tó a ground_top_y-tól lefelé tart, a képernyő aljáig kitölti
+        # a látható területet (és kicsit túl is, hogy ne legyen rés).
+        self.height = max(80, screen_height - ground_y + 24)
+        self.surface = self._build_water_surface()
+
+    def _build_water_surface(self) -> pygame.Surface:
+        s = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        # Vertikális gradient: világosabb teal felül, sötét indigo lefelé.
+        for y in range(self.height):
+            t = y / max(1, self.height - 1)
+            r = int(34 + (10 - 34) * t)
+            g = int(108 + (24 - 108) * t)
+            b = int(140 + (62 - 140) * t)
+            pygame.draw.line(s, (r, g, b, 255), (0, y), (self.width, y))
+        # "Belesütött" csillanások: statikus, a felső 35%-ban.
+        rng = random.Random(513)
+        for _ in range(50):
+            x = rng.randint(8, self.width - 8)
+            y = rng.randint(2, int(self.height * 0.35))
+            length = rng.randint(8, 26)
+            shade = rng.randint(180, 235)
+            pygame.draw.line(s, (shade, min(255, shade + 12), 255), (x, y), (x + length, y), 1)
+        # Felső szegély - egy halvány, fehéres "vízszint" csík.
+        pygame.draw.line(s, (200, 230, 255, 180), (0, 1), (self.width, 1), 2)
+        return s
+
+    @property
+    def left_edge(self) -> float:
+        return self.world_x
+
+    @property
+    def right_edge(self) -> float:
+        return self.world_x + self.width
+
+    def trigger_x(self) -> float:
+        return self.left_edge - self.trigger_distance
+
+    def is_blocking(self) -> bool:
+        return not self.solved
+
+    def solve(self) -> None:
+        self.solved = True
+
+    def update(self, dt: float) -> None:
+        self.water_anim_t += dt
+
+    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+        screen_x = round(self.world_x - camera_x)
+        rect = self.surface.get_rect(topleft=(screen_x, self.ground_y))
+        screen.blit(self.surface, rect)
+        # Mozgó hullámvonalak előtér-rétegben - egyszerű, opaque vonalak.
+        # (Az alfa-csatornás vonalrajzolás közvetlenül a screen-re nem működik
+        # alpha-betartással, ezért fix világos színt használunk.)
+        for i in range(12):
+            phase = (self.water_anim_t * 0.5 + i * 0.27) % 1.0
+            x = screen_x + int(self.width * phase)
+            y = self.ground_y + 5 + (i % 5) * 4
+            shade_t = 1.0 - phase
+            shade = int(140 + 95 * shade_t)
+            length = 16 + int(shade_t * 8)
+            pygame.draw.line(screen, (shade, min(255, shade + 30), 255), (x, y), (x + length, y), 1)
+
+
+class WillpowerIndicator:
+    """Vízszintes haladó-sáv a tó akadály visszajelzésére (csökönyösen nyomod-e)."""
+
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.progress = 0.0
+        self.alpha = 0.0
+        self.bar_width = max(80, int(config.height * 0.10))
+        self.bar_height = 6
+
+    def update(self, target_progress: float, dt: float) -> None:
+        # A megjelenített progressz simán követi a tényleges hold_timer arányát.
+        diff = target_progress - self.progress
+        progress_speed = 6.0
+        if abs(diff) <= progress_speed * dt:
+            self.progress = target_progress
+        else:
+            self.progress += progress_speed * dt if diff > 0 else -progress_speed * dt
+        self.progress = max(0.0, min(1.0, self.progress))
+        # Alpha: csak akkor látszik, ha aktív a holdolás.
+        target_alpha = 1.0 if target_progress > 0.005 else 0.0
+        diff_a = target_alpha - self.alpha
+        step = 4.0 * dt
+        if abs(diff_a) <= step:
+            self.alpha = target_alpha
+        else:
+            self.alpha += step if diff_a > 0 else -step
+        self.alpha = max(0.0, min(1.0, self.alpha))
+
+    def reset(self) -> None:
+        self.progress = 0.0
+        self.alpha = 0.0
+
+    def draw(self, screen: pygame.Surface, anchor_pos: tuple[int, int]) -> None:
+        if self.alpha <= 0.01:
+            return
+        cx, cy = anchor_pos
+        w = self.bar_width
+        h = self.bar_height
+        bar = pygame.Surface((w + 4, h + 4), pygame.SRCALPHA)
+        # Háttér
+        pygame.draw.rect(bar, (10, 20, 50, int(180 * self.alpha)),
+                         bar.get_rect(), border_radius=h)
+        # Telt rész
+        fill_w = int(w * self.progress)
+        if fill_w > 0:
+            pygame.draw.rect(bar, (140, 220, 255, int(230 * self.alpha)),
+                             (2, 2, fill_w, h), border_radius=h)
+        # Halvány keret
+        pygame.draw.rect(bar, (180, 230, 255, int(120 * self.alpha)),
+                         bar.get_rect(), 1, border_radius=h)
+        bar_rect = bar.get_rect(center=(cx, cy))
+        screen.blit(bar, bar_rect)
 
 
 class Player:
@@ -752,13 +919,22 @@ class Game:
         self.player = Player(self.config)
         self.dialogue = DialogueBox(self.config)
         self.thought_bubble = ThoughtBubble(self.config)
-        self.bush = ThornBush(world_x=2500, ground_y=self.config.ground_top_y, scale=max(1.0, self.config.height / 700))
+        scale = max(1.0, self.config.height / 700)
+        self.bush = ThornBush(world_x=2500, ground_y=self.config.ground_top_y, scale=scale)
+        self.lake = Lake(world_x=LAKE_WORLD_X, ground_y=self.config.ground_top_y,
+                         screen_height=self.config.height, scale=scale)
+        self.willpower = WillpowerIndicator(self.config)
         self.camera_x = 0.0
         self.cinematic_camera_active = False
         self.cinematic_camera_target_x = 0.0
         self.pending_obstacle_text = ""
+        # Bozót akadály állapotai
         self.bush_event_triggered = False
         self.bush_solved = False
+        # Tó akadály állapotai
+        self.lake_event_triggered = False
+        self.lake_solved = False
+        self.lake_hold_timer = 0.0  # 0..LAKE_HOLD_DURATION
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         # Cache-elt help szöveg - nem változik, nem kell minden frame újra-renderelni.
         self._help_surface: pygame.Surface | None = None
@@ -779,13 +955,25 @@ class Game:
         return not self.dialogue.active and not self.cinematic_camera_active
 
     def movement_blocked(self) -> bool:
-        """Mozgás-tiltás amíg a bozót akadályt meg nem oldja a játékos."""
+        """Teljes mozgás-tiltás csak a bozót akadálynál van. A tó NEM tiltja
+        a mozgást, csak a jobbra-haladást blokkolja az obstacle_left_edge-en át -
+        így a játékos elsétálhat balra is, és a fizika természetes marad."""
         return self.bush_event_triggered and not self.bush_solved
 
     def obstacle_left_edge(self) -> float | None:
         if self.bush_event_triggered and not self.bush_solved:
             return self.bush.left_edge
+        if self.lake_event_triggered and not self.lake_solved:
+            return self.lake.left_edge
         return None
+
+    def is_pressed_against_lake(self) -> bool:
+        """A játékos ténylegesen a tó által blokkolt helyzetben van-e?
+        (handle_input min()-eli a world_x-et erre az értékre, ha jobbra próbál menni.)"""
+        if not self.lake_event_triggered or self.lake_solved:
+            return False
+        block_x = self.lake.left_edge - self.player.collision_half_width
+        return abs(self.player.world_x - block_x) < LAKE_BLOCK_EPSILON
 
     def start_obstacle_reveal(self, obstacle_left_edge: float, stop_distance: float, text: str) -> None:
         """Közös, újrahasználható akadály-megjelenítés minden nagy akadályhoz."""
@@ -803,6 +991,10 @@ class Game:
     def trigger_bush_event(self) -> None:
         self.bush_event_triggered = True
         self.start_obstacle_reveal(self.bush.left_edge, self.bush.stop_distance, THORN_TEXT)
+
+    def trigger_lake_event(self) -> None:
+        self.lake_event_triggered = True
+        self.start_obstacle_reveal(self.lake.left_edge, self.lake.stop_distance, LAKE_TEXT)
 
     def update_cinematic_camera(self, dt: float) -> bool:
         if not self.cinematic_camera_active:
@@ -864,11 +1056,20 @@ class Game:
         self.background.draw_sky(self.screen)
         self.bush.draw(self.screen, self.camera_x)
         self.background.draw_ground(self.screen, self.camera_x)
+        # Tó a ground UTÁN, hogy lefedje a vízfelszín alatti talajt.
+        self.lake.draw(self.screen, self.camera_x)
         self.player.draw(self.screen, self.camera_x)
-        # Thought bubble a játékos feje fölött (csak ha látható)
+        # Vizuális overlay-k a játékos feje fölött:
         player_screen_x = round(self.player.world_x - self.camera_x)
         player_top_y = round(self.player.y) - SPRITE_HEIGHT
-        self.thought_bubble.draw(self.screen, (player_screen_x, player_top_y))
+        # Gondolatfelhő anchor: a farkas közepétől kicsit JOBBRA, fej magasságában.
+        # A buborék MAGA jobbra-fent jelenik meg, a tail bal-lefelé visszamutat.
+        bubble_anchor = (player_screen_x + 5, player_top_y + 35)
+        self.thought_bubble.draw(self.screen, bubble_anchor)
+        # Willpower-sáv: a fej fölött középen, csak a tó akadálynál látható.
+        if self.lake_event_triggered and not self.lake_solved:
+            wp_anchor = (player_screen_x, player_top_y - 18)
+            self.willpower.draw(self.screen, wp_anchor)
         self.draw_help()
         self.dialogue.draw(self.screen)
         pygame.display.flip()
@@ -888,22 +1089,65 @@ class Game:
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self.handle_mouse_click(event.pos)
 
+            # Akadály-trigger ellenőrzés: csak az aktuálisan releváns akadály.
             if not self.bush_event_triggered and self.player.world_x >= self.bush.trigger_x():
                 self.trigger_bush_event()
+            elif (self.bush_solved and not self.lake_event_triggered
+                  and self.player.world_x >= self.lake.trigger_x()):
+                self.trigger_lake_event()
 
             blocked = self.movement_blocked()
             self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled(), blocked)
-            # Ha a játékos próbál mozogni de a bozót blokkolja - mutassuk a gondolatfelhőt.
+            # Bozót: gondolatfelhő ha próbálkozik mozogni.
             if blocked and self.player.tried_to_move and not self.dialogue.active:
                 self.thought_bubble.show()
+
+            # Tó: csökönyös jobbra-nyomás számolása.
+            self._update_lake_hold(dt)
 
             self.player.update_physics(dt)
             self.player.update_animation(dt)
             self.bush.update(dt)
+            self.lake.update(dt)
             self.thought_bubble.update(dt)
+            # A willpower-sáv csak akkor "él", ha aktív tó-akadály van.
+            wp_target = (self.lake_hold_timer / LAKE_HOLD_DURATION
+                         if (self.lake_event_triggered and not self.lake_solved)
+                         else 0.0)
+            self.willpower.update(wp_target, dt)
             self.update_camera(dt)
             self.draw()
         pygame.quit()
+
+    def _update_lake_hold(self, dt: float) -> None:
+        """A tó-puzzle "csökönyös jobbra-nyomás" számláló kezelése.
+
+        Csak akkor ticelünk, ha:
+          - aktív a tó-akadály ÉS még nem oldódott meg,
+          - a játékos fizikailag a tó-élnek nyomódik (nem csak közelít),
+          - a játékos jobbra-irányú gombot tartja,
+          - a kontrollok engedélyezettek (nincs aktív dialógus / cinematic).
+
+        Elengedéskor gyorsan visszaesik (LAKE_HOLD_DECAY), így TÉNYLEG
+        folyamatosan kell tartani 5 másodpercig - ahogy a "csökönyös" szó
+        sugallja.
+        """
+        if not self.lake_event_triggered or self.lake_solved:
+            self.lake_hold_timer = 0.0
+            return
+        if not self.controls_enabled():
+            return  # Dialógus alatt sem ticeljen, sem ne csökkenjen.
+
+        keys = pygame.key.get_pressed()
+        holding_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+        if holding_right and self.is_pressed_against_lake():
+            self.lake_hold_timer = min(LAKE_HOLD_DURATION, self.lake_hold_timer + dt)
+            if self.lake_hold_timer >= LAKE_HOLD_DURATION:
+                self.lake_solved = True
+                self.lake.solve()
+                self.dialogue.show(LAKE_SOLVED_TEXT)
+        else:
+            self.lake_hold_timer = max(0.0, self.lake_hold_timer - dt * LAKE_HOLD_DECAY)
 
 
 def main() -> None:
