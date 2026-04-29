@@ -38,10 +38,19 @@ GREEN_ALPHA_DOMINANCE = 28
 
 INTRO_TEXT = "Valami azt súgja nekem meg kell találnom a békémet..."
 THORN_TEXT = "Néha csak úgy juthatunk tovább, ha megtaláljuk a legszűkebb járható ösvényt."
+BLOCKED_THOUGHT_TEXT = "Valahogy át kellene jutnom..."
+BUSH_COLLAPSE_TEXT = "Néha csak egy apróságon múlik az egész."
 WINDOW_TITLE = "Little Wolf Journey"
 
 OBSTACLE_CAMERA_REVEAL_SPEED = 230.0
 OBSTACLE_CAMERA_REVEAL_EPSILON = 1.0
+
+WEAK_SPOT_RADIUS = 18  # mekkora körön belül érzékeny a bozót gyenge pontja
+WEAK_SPOT_MIN_ALPHA = 110  # csak elég látható pixel lehet weak spot
+BUSH_COLLAPSE_RATE = 1.4  # 1/sec - kb. 0.7s teljes összeomlás
+THOUGHT_BUBBLE_FADE_SPEED = 5.0
+THOUGHT_BUBBLE_VISIBLE_TIME = 1.6
+MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
 
 class WorldConfig:
@@ -51,7 +60,9 @@ class WorldConfig:
         self.center_x = width // 2
         self.left_frame_x = max(55, int(width * 0.075))
         self.right_edge_x = int(width * 0.82)
-        self.camera_smoothness = 4.8
+        # Magasabb érték -> kisebb steady-state lemaradás a játékos mögött.
+        # 9.0 esetén lag = v_player / 9.0 = 300/9 ≈ 33 px (4.8-nál még 62 px volt).
+        self.camera_smoothness = 9.0
         self.ground_top_y = int(height * 0.885)
         self.ground_cap_height = max(12, int(height * 0.022))
 
@@ -376,6 +387,70 @@ class DialogueBox:
         screen.blit(hint, hint_rect)
 
 
+class ThoughtBubble:
+    """Lebegő gondolatfelhő a játékos feje fölött, fade-in/fade-out animációval."""
+
+    def __init__(self, config: WorldConfig, text: str = BLOCKED_THOUGHT_TEXT) -> None:
+        self.config = config
+        self.text = text
+        self.font = pygame.font.SysFont("arial", max(20, int(config.height * 0.026)), italic=True)
+        self.alpha = 0.0
+        self.target_alpha = 0.0
+        self.visible_timer = 0.0
+        self._cached_bubble: pygame.Surface | None = None
+        self._build_bubble()
+
+    def _build_bubble(self) -> None:
+        text_surf = self.font.render(self.text, True, (28, 30, 78))
+        padding_x, padding_y = 22, 14
+        bubble_w = text_surf.get_width() + padding_x * 2
+        bubble_h = text_surf.get_height() + padding_y * 2
+        tail_extra = 56  # plusz hely a tail-felhőknek a buborék alatt
+        surf = pygame.Surface((bubble_w, bubble_h + tail_extra), pygame.SRCALPHA)
+        fill = (245, 248, 255)
+        border = (140, 152, 210)
+        # Tail: 3 csökkenő sugarú felhőcske, ferdén lefelé a játékos felé
+        cx_anchor = bubble_w // 2 - 14
+        for cx_off, cy_off, r in [(0, bubble_h + 12, 12), (-16, bubble_h + 26, 8), (-26, bubble_h + 38, 5)]:
+            pygame.draw.circle(surf, border, (cx_anchor + cx_off, cy_off), r)
+            pygame.draw.circle(surf, fill, (cx_anchor + cx_off, cy_off), r - 2)
+        # Fő buborék
+        pygame.draw.rect(surf, fill, (0, 0, bubble_w, bubble_h), border_radius=20)
+        pygame.draw.rect(surf, border, (0, 0, bubble_w, bubble_h), 2, border_radius=20)
+        surf.blit(text_surf, (padding_x, padding_y))
+        self._cached_bubble = surf
+
+    def show(self) -> None:
+        """A megjelenítés "kérése" - minden hívás újraindítja a látható időt."""
+        self.target_alpha = 1.0
+        self.visible_timer = THOUGHT_BUBBLE_VISIBLE_TIME
+
+    def hide_immediately(self) -> None:
+        self.alpha = 0.0
+        self.target_alpha = 0.0
+        self.visible_timer = 0.0
+
+    def update(self, dt: float) -> None:
+        if self.visible_timer > 0:
+            self.visible_timer -= dt
+            if self.visible_timer <= 0:
+                self.target_alpha = 0.0
+        diff = self.target_alpha - self.alpha
+        step = THOUGHT_BUBBLE_FADE_SPEED * dt
+        if abs(diff) <= step:
+            self.alpha = self.target_alpha
+        else:
+            self.alpha += step if diff > 0 else -step
+
+    def draw(self, screen: pygame.Surface, anchor_screen_pos: tuple[int, int]) -> None:
+        if self.alpha <= 0.01 or self._cached_bubble is None:
+            return
+        bubble = self._cached_bubble
+        bubble.set_alpha(int(255 * self.alpha))
+        bubble_rect = bubble.get_rect(midbottom=(anchor_screen_pos[0], anchor_screen_pos[1] - 8))
+        screen.blit(bubble, bubble_rect)
+
+
 class ThornBush:
     def __init__(self, world_x: float, ground_y: int, scale: float = 1.0) -> None:
         self.world_x = world_x
@@ -383,6 +458,11 @@ class ThornBush:
         self.trigger_distance = 460
         self.stop_distance = 420
         self.surface = self._create_surface(scale)
+        self.collapsed = False
+        self.collapse_progress = 0.0
+        # A weak spot véletlen, minden játékindításkor más helyen van.
+        # Determinisztikus seed nélkül választjuk!
+        self.weak_spot_local: tuple[int, int] | None = self._choose_weak_spot()
 
     def _create_surface(self, scale: float) -> pygame.Surface:
         width = int(620 * scale)
@@ -422,6 +502,27 @@ class ThornBush:
             pygame.draw.circle(surface, leaf_glow, (cx - radius // 4, cy - radius // 4), max(8, radius // 2), 2)
         return surface
 
+    def _choose_weak_spot(self) -> tuple[int, int] | None:
+        """Random pixel a bozót látható területén belül, ami a hatékony találati pont."""
+        rng = random.Random()  # nem deterministic - minden játékindításnál más
+        width, height = self.surface.get_size()
+        candidates: list[tuple[int, int]] = []
+        # Egyszer lock-olunk és sok mintát veszünk - sokkal gyorsabb mint frame-enként.
+        self.surface.lock()
+        try:
+            for _ in range(800):
+                x = rng.randint(int(width * 0.18), int(width * 0.82))
+                y = rng.randint(int(height * 0.30), int(height * 0.85))
+                if self.surface.get_at((x, y))[3] >= WEAK_SPOT_MIN_ALPHA:
+                    candidates.append((x, y))
+                    if len(candidates) >= 40:
+                        break
+        finally:
+            self.surface.unlock()
+        if not candidates:
+            return (width // 2, int(height * 0.6))
+        return rng.choice(candidates)
+
     @property
     def left_edge(self) -> float:
         return self.world_x
@@ -429,10 +530,60 @@ class ThornBush:
     def trigger_x(self) -> float:
         return self.left_edge - self.trigger_distance
 
+    def weak_spot_world_pos(self) -> tuple[float, float] | None:
+        """A weak spot világkoordinátái (a bozót draw-jával konzisztensen)."""
+        if self.weak_spot_local is None:
+            return None
+        sx, sy = self.weak_spot_local
+        height = self.surface.get_height()
+        # A surface bottomleft = (world_x, ground_y + 18) - lásd draw().
+        # Tehát surface (0,0) világkoordinátában: (world_x, ground_y + 18 - height)
+        wx = self.world_x + sx
+        wy = self.ground_y + 18 - height + sy
+        return (wx, wy)
+
+    def is_weak_spot_hit(self, world_x: float, world_y: float, radius: float = WEAK_SPOT_RADIUS) -> bool:
+        if self.collapsed:
+            return False
+        spot = self.weak_spot_world_pos()
+        if spot is None:
+            return False
+        dx = world_x - spot[0]
+        dy = world_y - spot[1]
+        return dx * dx + dy * dy <= radius * radius
+
+    def collapse(self) -> None:
+        if self.collapsed:
+            return
+        self.collapsed = True
+        self.collapse_progress = 0.0
+
+    def update(self, dt: float) -> None:
+        if self.collapsed and self.collapse_progress < 1.0:
+            self.collapse_progress = min(1.0, self.collapse_progress + BUSH_COLLAPSE_RATE * dt)
+
+    def is_visually_gone(self) -> bool:
+        return self.collapsed and self.collapse_progress >= 1.0
+
     def draw(self, screen: pygame.Surface, camera_x: float) -> None:
-        screen_x = int(self.world_x - camera_x)
+        if self.is_visually_gone():
+            return
+        screen_x = round(self.world_x - camera_x)
         rect = self.surface.get_rect(bottomleft=(screen_x, self.ground_y + 18))
-        screen.blit(self.surface, rect)
+        if self.collapse_progress > 0:
+            t = self.collapse_progress
+            # Összeesik (függőleges scale csökken) + halványul + kicsit szétterül.
+            alpha = max(0, int(255 * (1.0 - t)))
+            scale_y = max(0.05, 1.0 - t * 0.85)
+            scale_x = 1.0 + t * 0.06
+            new_w = max(1, int(self.surface.get_width() * scale_x))
+            new_h = max(1, int(self.surface.get_height() * scale_y))
+            scaled = pygame.transform.smoothscale(self.surface, (new_w, new_h))
+            scaled.set_alpha(alpha)
+            scaled_rect = scaled.get_rect(midbottom=rect.midbottom)
+            screen.blit(scaled, scaled_rect)
+        else:
+            screen.blit(self.surface, rect)
 
 
 class Player:
@@ -463,6 +614,9 @@ class Player:
         self.jump_phase = "up"
         self.jump_phase_timer = 0.0
         self.collision_half_width = 38
+        # Új: a játékos próbált-e mozogni ebben a frame-ben (még akkor is, ha
+        # az effektív mozgás blokkolva van). Erre figyelünk a thought bubble-höz.
+        self.tried_to_move = False
 
     def start_animation(self, state: str) -> None:
         if self.animation_state != state:
@@ -474,11 +628,22 @@ class Player:
             self.jump_phase = phase
             self.jump_phase_timer = 0.0
 
-    def handle_input(self, dt: float, obstacle_left_edge: float | None, controls_enabled: bool) -> None:
+    def handle_input(self, dt: float, obstacle_left_edge: float | None,
+                     controls_enabled: bool, movement_blocked: bool = False) -> None:
         keys = pygame.key.get_pressed()
-        moving_left = controls_enabled and (keys[pygame.K_LEFT] or keys[pygame.K_a])
-        moving_right = controls_enabled and (keys[pygame.K_RIGHT] or keys[pygame.K_d])
-        jump_pressed = controls_enabled and (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP])
+        raw_left = controls_enabled and (keys[pygame.K_LEFT] or keys[pygame.K_a])
+        raw_right = controls_enabled and (keys[pygame.K_RIGHT] or keys[pygame.K_d])
+        raw_jump = controls_enabled and (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP])
+
+        # A "raw" szándék azt jelzi: a játékos PRÓBÁLT mozogni.
+        # Ezt a Game használja a thought bubble triggerelésére.
+        self.tried_to_move = raw_left or raw_right or raw_jump
+
+        if movement_blocked:
+            moving_left = moving_right = jump_pressed = False
+        else:
+            moving_left, moving_right, jump_pressed = raw_left, raw_right, raw_jump
+
         horizontal_input = int(moving_right) - int(moving_left)
         self.movement_pressed = horizontal_input != 0
         self.vx = horizontal_input * PLAYER_SPEED
@@ -561,14 +726,17 @@ class Player:
         return image
 
     def draw(self, screen: pygame.Surface, camera_x: float) -> None:
-        screen_x = int(self.world_x - camera_x)
+        # round() használata int() helyett: subpixel-stutter csökkentése.
+        # int() truncate-ol, így 0.999-ről 1.001-re átlépéskor 1 px ugrás van;
+        # round() szimmetrikus, és a kamera-floathoz konzisztensebb.
+        screen_x = round(self.world_x - camera_x)
         height_above_ground = max(0.0, self.config.ground_top_y - self.y)
         shadow_scale = max(0.42, 1.0 - height_above_ground / 270.0)
         shadow_rect = pygame.Rect(0, 0, int(96 * shadow_scale), int(16 * shadow_scale))
         shadow_rect.center = (screen_x, self.config.ground_top_y + 8)
         pygame.draw.ellipse(screen, (33, 27, 72), shadow_rect)
         image = self.current_image()
-        rect = image.get_rect(midbottom=(screen_x, int(self.y)))
+        rect = image.get_rect(midbottom=(screen_x, round(self.y)))
         screen.blit(image, rect)
 
 
@@ -583,21 +751,41 @@ class Game:
         self.background = StaticBackground(self.config)
         self.player = Player(self.config)
         self.dialogue = DialogueBox(self.config)
+        self.thought_bubble = ThoughtBubble(self.config)
         self.bush = ThornBush(world_x=2500, ground_y=self.config.ground_top_y, scale=max(1.0, self.config.height / 700))
         self.camera_x = 0.0
         self.cinematic_camera_active = False
         self.cinematic_camera_target_x = 0.0
         self.pending_obstacle_text = ""
         self.bush_event_triggered = False
+        self.bush_solved = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
+        # Cache-elt help szöveg - nem változik, nem kell minden frame újra-renderelni.
+        self._help_surface: pygame.Surface | None = None
+        self._help_bg: pygame.Surface | None = None
+        self._build_help_overlay()
         self.running = True
         self.dialogue.show(INTRO_TEXT)
+
+    def _build_help_overlay(self) -> None:
+        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    Enter: üzenet bezárása    Esc: kilépés"
+        surface = self.debug_font.render(text, True, (226, 232, 255))
+        bg = pygame.Surface((surface.get_width() + 22, surface.get_height() + 14), pygame.SRCALPHA)
+        pygame.draw.rect(bg, (8, 12, 34, 110), bg.get_rect(), border_radius=14)
+        self._help_surface = surface
+        self._help_bg = bg
 
     def controls_enabled(self) -> bool:
         return not self.dialogue.active and not self.cinematic_camera_active
 
+    def movement_blocked(self) -> bool:
+        """Mozgás-tiltás amíg a bozót akadályt meg nem oldja a játékos."""
+        return self.bush_event_triggered and not self.bush_solved
+
     def obstacle_left_edge(self) -> float | None:
-        return self.bush.left_edge if self.bush_event_triggered else None
+        if self.bush_event_triggered and not self.bush_solved:
+            return self.bush.left_edge
+        return None
 
     def start_obstacle_reveal(self, obstacle_left_edge: float, stop_distance: float, text: str) -> None:
         """Közös, újrahasználható akadály-megjelenítés minden nagy akadályhoz."""
@@ -638,34 +826,57 @@ class Game:
             return
         screen_x = self.player.world_x - self.camera_x
         target_camera_x = self.camera_x
+        # JAVÍTÁS: a target a deadzone SZÉLÉN tartja a játékost, nem a center_x-en.
+        # Korábban a center_x-re ugrott a target, így a játékos folyamatosan a
+        # right_edge_x és center_x között "lebegett" - ez okozta az akadósságot.
+        # Most: amint átlép, a target a játékossal együtt halad fix offsettel.
         if screen_x > self.config.right_edge_x:
-            target_camera_x = self.player.world_x - self.config.center_x
+            target_camera_x = self.player.world_x - self.config.right_edge_x
         elif screen_x < self.config.left_frame_x and self.camera_x > 0:
             target_camera_x = self.player.world_x - self.config.left_frame_x
         target_camera_x = max(0.0, target_camera_x)
         smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
         self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
 
+    def handle_mouse_click(self, mouse_pos: tuple[int, int]) -> None:
+        """Egér-kattintás kezelése: a bozót weak spotjának keresése."""
+        if not self.bush_event_triggered or self.bush_solved:
+            return
+        if self.dialogue.active or self.cinematic_camera_active:
+            return
+        mouse_screen_x, mouse_screen_y = mouse_pos
+        # A kamera csak X-ben offsetet csinál, Y nem.
+        world_x = mouse_screen_x + self.camera_x
+        world_y = float(mouse_screen_y)
+        if self.bush.is_weak_spot_hit(world_x, world_y):
+            self.bush_solved = True
+            self.bush.collapse()
+            self.thought_bubble.hide_immediately()
+            self.dialogue.show(BUSH_COLLAPSE_TEXT)
+
     def draw_help(self) -> None:
-        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    Enter: üzenet bezárása    Esc: kilépés"
-        surface = self.debug_font.render(text, True, (226, 232, 255))
-        bg = pygame.Surface((surface.get_width() + 22, surface.get_height() + 14), pygame.SRCALPHA)
-        pygame.draw.rect(bg, (8, 12, 34, 110), bg.get_rect(), border_radius=14)
-        self.screen.blit(bg, (18, 18))
-        self.screen.blit(surface, (29, 25))
+        if self._help_surface is None or self._help_bg is None:
+            return
+        self.screen.blit(self._help_bg, (18, 18))
+        self.screen.blit(self._help_surface, (29, 25))
 
     def draw(self) -> None:
         self.background.draw_sky(self.screen)
         self.bush.draw(self.screen, self.camera_x)
         self.background.draw_ground(self.screen, self.camera_x)
         self.player.draw(self.screen, self.camera_x)
+        # Thought bubble a játékos feje fölött (csak ha látható)
+        player_screen_x = round(self.player.world_x - self.camera_x)
+        player_top_y = round(self.player.y) - SPRITE_HEIGHT
+        self.thought_bubble.draw(self.screen, (player_screen_x, player_top_y))
         self.draw_help()
         self.dialogue.draw(self.screen)
         pygame.display.flip()
 
     def run(self) -> None:
         while self.running:
-            dt = self.clock.tick(FPS) / 1000.0
+            # dt clamp: ha a frame megakad (pl. fókuszváltás miatt), ne ugorjon a játék.
+            dt = min(self.clock.tick(FPS) / 1000.0, MAX_FRAME_DT)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
@@ -674,11 +885,22 @@ class Game:
                         self.running = False
                     elif event.key == pygame.K_RETURN and self.dialogue.active:
                         self.dialogue.hide()
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_click(event.pos)
+
             if not self.bush_event_triggered and self.player.world_x >= self.bush.trigger_x():
                 self.trigger_bush_event()
-            self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled())
+
+            blocked = self.movement_blocked()
+            self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled(), blocked)
+            # Ha a játékos próbál mozogni de a bozót blokkolja - mutassuk a gondolatfelhőt.
+            if blocked and self.player.tried_to_move and not self.dialogue.active:
+                self.thought_bubble.show()
+
             self.player.update_physics(dt)
             self.player.update_animation(dt)
+            self.bush.update(dt)
+            self.thought_bubble.update(dt)
             self.update_camera(dt)
             self.draw()
         pygame.quit()
