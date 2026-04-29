@@ -591,7 +591,7 @@ class IntroMenuScreen:
         overlay.fill((5, 8, 26, 106))
         screen.blit(overlay, (0, 0))
 
-        panel_w = int(self.config.width * 0.42)
+        panel_w = int(self.config.width * 0.58)
         panel_h = int(self.config.height * 0.54)
         panel_rect = pygame.Rect(int(self.config.width * 0.09), int(self.config.height * 0.18), panel_w, panel_h)
 
@@ -629,7 +629,7 @@ class IntroMenuScreen:
         hint = self.small_font.render("Választás: ↑/↓ vagy W/S   •   Elfogadás: Enter   •   Egérrel is kattintható", True, (220, 227, 255))
         hint_bg = pygame.Surface((hint.get_width() + 20, hint.get_height() + 12), pygame.SRCALPHA)
         pygame.draw.rect(hint_bg, (7, 12, 34, 125), hint_bg.get_rect(), border_radius=16)
-        hint_pos = (panel_rect.x + 24, panel_rect.bottom - 58)
+        hint_pos = (panel_rect.x + 24, panel_rect.bottom+5)
         screen.blit(hint_bg, hint_pos)
         screen.blit(hint, (hint_pos[0] + 10, hint_pos[1] + 6))
 
@@ -1801,10 +1801,12 @@ class Game:
         pygame.display.flip()
 
     def draw_help(self) -> None:
-        if self._help_surface is None or self._help_bg is None:
-            return
-        self.screen.blit(self._help_bg, (18, 18))
-        self.screen.blit(self._help_surface, (29, 25))
+      if self.state != "playing" or self.dialogue.active:
+        return
+      if self._help_surface is None or self._help_bg is None:
+        return
+      self.screen.blit(self._help_bg, (18, 18))
+      self.screen.blit(self._help_surface, (29, 25))
 
     def draw(self) -> None:
         self.background.draw_sky(self.screen)
@@ -1828,7 +1830,7 @@ class Game:
         if self.lake_event_triggered and not self.lake_solved:
             wp_anchor = (player_screen_x, player_top_y - 18)
             self.willpower.draw(self.screen, wp_anchor)
-        if not self.dark_challenge.is_visible():
+        if self.state == "playing" and not self.dialogue.active and not self.dark_challenge.is_visible():
             self.draw_help()
         self.draw_music_status()
         self.dialogue.draw(self.screen)
