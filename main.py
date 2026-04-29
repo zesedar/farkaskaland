@@ -311,7 +311,12 @@ class StaticBackground:
         self.ground_tile = self._create_ground_tile()
 
     def _load_background(self) -> pygame.Surface:
-        candidates = [Path(__file__).parent / "assets" / "hatter.png", Path("/mnt/data/assets/hatter.png")]
+        candidates = [
+            Path(__file__).parent / "assets" / "hatter.png",
+            Path(__file__).parent / "assets" / "intro_background.png",
+            Path("/mnt/data/assets/hatter.png"),
+            Path("/mnt/data/ghostwriter_images/context/cfad7fbc-a0c5-59f7-9bef-e2c6a91c52f1.png"),
+        ]
         source = next((path for path in candidates if path.exists()), None)
         if source is not None:
             image = pygame.image.load(str(source)).convert()
@@ -504,6 +509,184 @@ class ThoughtBubble:
         # mutat vissza a farkas feje felé. Bal oldalon NEM lóg ki túl a szegélyen.
         bubble_rect = bubble.get_rect(bottomleft=anchor_screen_pos)
         screen.blit(bubble, bubble_rect)
+
+
+class IntroMenuScreen:
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.options = ["Játék indítása", "Névjegy", "Kilépés"]
+        self.selected_index = 0
+        self.title_font = pygame.font.SysFont("georgia", max(54, int(config.height * 0.085)), bold=True)
+        self.subtitle_font = pygame.font.SysFont("arial", max(24, int(config.height * 0.038)), italic=True)
+        self.option_font = pygame.font.SysFont("arial", max(28, int(config.height * 0.043)), bold=True)
+        self.body_font = pygame.font.SysFont("arial", max(22, int(config.height * 0.031)))
+        self.small_font = pygame.font.SysFont("arial", max(18, int(config.height * 0.024)))
+        self.option_rects: list[pygame.Rect] = []
+        self.background = self._load_background()
+        self.wolf_art = self._load_wolf_art()
+
+    def _load_background(self) -> pygame.Surface:
+        candidates = [
+            Path(__file__).parent / "assets" / "intro_background.png",
+            Path(__file__).parent / "assets" / "hatter.png",
+            Path("/mnt/data/ghostwriter_images/context/cfad7fbc-a0c5-59f7-9bef-e2c6a91c52f1.png"),
+        ]
+        source = next((path for path in candidates if path.exists()), None)
+        if source is not None:
+            image = pygame.image.load(str(source)).convert()
+            return pygame.transform.smoothscale(image, (self.config.width, self.config.height))
+
+        fallback = pygame.Surface((self.config.width, self.config.height))
+        top = pygame.Color(8, 16, 78)
+        middle = pygame.Color(78, 45, 183)
+        bottom = pygame.Color(233, 131, 185)
+        for y in range(self.config.height):
+            t = y / max(1, self.config.height - 1)
+            if t < 0.62:
+                color = top.lerp(middle, t / 0.62)
+            else:
+                color = middle.lerp(bottom, (t - 0.62) / 0.38)
+            pygame.draw.line(fallback, color, (0, y), (self.config.width, y))
+        moon_center = (int(self.config.width * 0.18), int(self.config.height * 0.18))
+        pygame.draw.circle(fallback, (250, 236, 206), moon_center, max(38, int(self.config.height * 0.06)))
+        pygame.draw.circle(fallback, (35, 41, 126), (moon_center[0] + 18, moon_center[1] - 2), max(34, int(self.config.height * 0.052)))
+        rng = random.Random(77)
+        for _ in range(140):
+            x = rng.randint(0, self.config.width - 1)
+            y = rng.randint(0, int(self.config.height * 0.58))
+            radius = rng.randint(1, 2)
+            shade = rng.randint(220, 255)
+            pygame.draw.circle(fallback, (shade, shade, 255), (x, y), radius)
+        return fallback
+
+    def _load_wolf_art(self) -> pygame.Surface | None:
+        candidates = [
+            Path(__file__).parent / "assets" / "menu_wolf.png",
+            Path("/mnt/data/ghostwriter_images/context/956dca34-f53d-5e3a-af9c-824288cfb066.png"),
+        ]
+        source = next((path for path in candidates if path.exists()), None)
+        if source is None:
+            return None
+        try:
+            image = pygame.image.load(str(source)).convert_alpha()
+            target_h = max(140, int(self.config.height * 0.24))
+            scale = target_h / max(1, image.get_height())
+            target_w = max(1, int(image.get_width() * scale))
+            return pygame.transform.smoothscale(image, (target_w, target_h))
+        except Exception:
+            return None
+
+    def move_selection(self, delta: int) -> None:
+        self.selected_index = (self.selected_index + delta) % len(self.options)
+
+    def option_at(self, pos: tuple[int, int]) -> int | None:
+        for index, rect in enumerate(self.option_rects):
+            if rect.collidepoint(pos):
+                return index
+        return None
+
+    def draw_menu(self, screen: pygame.Surface) -> None:
+        screen.blit(self.background, (0, 0))
+        overlay = pygame.Surface((self.config.width, self.config.height), pygame.SRCALPHA)
+        overlay.fill((5, 8, 26, 106))
+        screen.blit(overlay, (0, 0))
+
+        panel_w = int(self.config.width * 0.42)
+        panel_h = int(self.config.height * 0.54)
+        panel_rect = pygame.Rect(int(self.config.width * 0.09), int(self.config.height * 0.18), panel_w, panel_h)
+
+        panel_shadow = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel_shadow, (0, 0, 0, 95), panel_shadow.get_rect(), border_radius=28)
+        screen.blit(panel_shadow, panel_rect.move(0, 10).topleft)
+
+        panel = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel, (11, 15, 41, 188), panel.get_rect(), border_radius=28)
+        pygame.draw.rect(panel, (129, 151, 239, 225), panel.get_rect(), 2, border_radius=28)
+        screen.blit(panel, panel_rect.topleft)
+
+        title = self.title_font.render(WINDOW_TITLE, True, (241, 239, 255))
+        subtitle = self.subtitle_font.render("Holdfényes utazás egy csendes, meseszerű világban.", True, (201, 208, 255))
+        screen.blit(title, (panel_rect.x + 34, panel_rect.y + 28))
+        screen.blit(subtitle, (panel_rect.x + 36, panel_rect.y + 108))
+
+        self.option_rects = []
+        start_y = panel_rect.y + 170
+        box_h = max(54, int(self.config.height * 0.08))
+        for index, option in enumerate(self.options):
+            rect = pygame.Rect(panel_rect.x + 30, start_y + index * (box_h + 18), panel_rect.width - 60, box_h)
+            self.option_rects.append(rect)
+            selected = index == self.selected_index
+            box = pygame.Surface(rect.size, pygame.SRCALPHA)
+            fill = (137, 112, 232, 210) if selected else (29, 38, 89, 170)
+            border = (238, 228, 255, 240) if selected else (120, 139, 219, 210)
+            pygame.draw.rect(box, fill, box.get_rect(), border_radius=18)
+            pygame.draw.rect(box, border, box.get_rect(), 2, border_radius=18)
+            screen.blit(box, rect.topleft)
+            label = self.option_font.render(option, True, (255, 248, 255) if selected else (224, 231, 255))
+            label_rect = label.get_rect(center=rect.center)
+            screen.blit(label, label_rect)
+
+        hint = self.small_font.render("Választás: ↑/↓ vagy W/S   •   Elfogadás: Enter   •   Egérrel is kattintható", True, (220, 227, 255))
+        hint_bg = pygame.Surface((hint.get_width() + 20, hint.get_height() + 12), pygame.SRCALPHA)
+        pygame.draw.rect(hint_bg, (7, 12, 34, 125), hint_bg.get_rect(), border_radius=16)
+        hint_pos = (panel_rect.x + 24, panel_rect.bottom - 58)
+        screen.blit(hint_bg, hint_pos)
+        screen.blit(hint, (hint_pos[0] + 10, hint_pos[1] + 6))
+
+        moon_quote = self.small_font.render("„Valami azt súgja, meg kell találnom a békémet...”", True, (238, 228, 255))
+        screen.blit(moon_quote, (int(self.config.width * 0.09), self.config.height - 54))
+
+        if self.wolf_art is not None:
+            wolf = self.wolf_art.copy()
+            wolf.set_alpha(244)
+            wolf_rect = wolf.get_rect(bottomright=(self.config.width - 86, self.config.height - 76))
+            glow_rect = wolf_rect.inflate(70, 52)
+            glow = pygame.Surface(glow_rect.size, pygame.SRCALPHA)
+            pygame.draw.ellipse(glow, (138, 98, 238, 70), glow.get_rect())
+            screen.blit(glow, glow_rect.topleft)
+            screen.blit(wolf, wolf_rect)
+
+    def draw_about(self, screen: pygame.Surface, music_enabled: bool, music_available: bool, music_path_found: bool) -> None:
+        screen.blit(self.background, (0, 0))
+        dim = pygame.Surface((self.config.width, self.config.height), pygame.SRCALPHA)
+        dim.fill((2, 5, 18, 152))
+        screen.blit(dim, (0, 0))
+
+        panel_rect = pygame.Rect(0, 0, int(self.config.width * 0.62), int(self.config.height * 0.64))
+        panel_rect.center = (self.config.width // 2, self.config.height // 2)
+        shadow = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(shadow, (0, 0, 0, 105), shadow.get_rect(), border_radius=28)
+        screen.blit(shadow, panel_rect.move(0, 10).topleft)
+
+        panel = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel, (11, 16, 42, 218), panel.get_rect(), border_radius=28)
+        pygame.draw.rect(panel, (130, 154, 240, 230), panel.get_rect(), 2, border_radius=28)
+        screen.blit(panel, panel_rect.topleft)
+
+        title = self.title_font.render("Névjegy", True, (245, 243, 255))
+        screen.blit(title, (panel_rect.x + 34, panel_rect.y + 26))
+
+        music_text = "bekapcsolva" if music_enabled else "kikapcsolva"
+        availability_text = "rendben betöltve" if music_available else ("a dallam.wav hiányzik" if not music_path_found else "hangrendszer nem elérhető")
+        paragraphs = [
+            "Ez a játék egy holdfényes, mesés hangulatú 2D oldalnézetes kaland.",
+            "A főmenüből elindítható a játék, megnyitható ez a névjegy, vagy kiléphetsz.",
+            "Irányítás játék közben: A/D vagy nyilak a mozgáshoz, Space/W/Fel az ugráshoz, Enter az üzenetek bezárásához.",
+            f"Zene: M billentyűvel kapcsolható ki vagy be. Jelenleg: {music_text}; állapot: {availability_text}.",
+            "A dallam végtelenítve szól, ha az assets könyvtárban megtalálható a dallam.wav fájl.",
+            "Vissza a menübe: Esc, Backspace vagy Enter.",
+        ]
+        max_width = panel_rect.width - 70
+        y = panel_rect.y + 108
+        for paragraph in paragraphs:
+            for line in wrap_text(paragraph, self.body_font, max_width):
+                rendered = self.body_font.render(line, True, (228, 234, 255))
+                screen.blit(rendered, (panel_rect.x + 36, y))
+                y += rendered.get_height() + 8
+            y += 10
+
+        footer = self.small_font.render("Esc / Backspace / Enter - vissza a főmenübe", True, (200, 211, 255))
+        screen.blit(footer, (panel_rect.x + 36, panel_rect.bottom - 48))
 
 
 class ThornBush:
@@ -1297,6 +1480,12 @@ class Game:
         self.config = WorldConfig(max(960, info.current_w), max(540, info.current_h))
         self.screen = pygame.display.set_mode((self.config.width, self.config.height), pygame.FULLSCREEN)
         self.clock = pygame.time.Clock()
+        self.menu = IntroMenuScreen(self.config)
+        self.state = "menu"
+        self.music_enabled = True
+        self.music_available = False
+        self.music_path_found = False
+        self._init_music()
         self.background = StaticBackground(self.config)
         self.player = Player(self.config)
         self.dialogue = DialogueBox(self.config)
@@ -1329,20 +1518,88 @@ class Game:
         self.dark_solved = False
         self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
+        self.music_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.025)), bold=True)
         # Cache-elt help szöveg - nem változik, nem kell minden frame újra-renderelni.
         self._help_surface: pygame.Surface | None = None
         self._help_bg: pygame.Surface | None = None
         self._build_help_overlay()
         self.running = True
-        self.dialogue.show(INTRO_TEXT)
 
     def _build_help_overlay(self) -> None:
-        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    Enter: üzenet bezárása    Esc: kilépés"
+        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    M: zene ki/be    Enter: üzenet bezárása    Esc: kilépés"
         surface = self.debug_font.render(text, True, (226, 232, 255))
         bg = pygame.Surface((surface.get_width() + 22, surface.get_height() + 14), pygame.SRCALPHA)
         pygame.draw.rect(bg, (8, 12, 34, 110), bg.get_rect(), border_radius=14)
         self._help_surface = surface
         self._help_bg = bg
+
+    def _init_music(self) -> None:
+        asset_dir = Path(__file__).parent / "assets"
+        candidates = [
+            asset_dir / "dallam.wav",
+            Path("/mnt/data/assets/dallam.wav"),
+        ]
+        music_path = next((path for path in candidates if path.exists()), asset_dir / "dallam.wav")
+        self.music_path_found = music_path.exists()
+        try:
+            if pygame.mixer.get_init() is None:
+                pygame.mixer.init()
+            if self.music_path_found:
+                pygame.mixer.music.load(str(music_path))
+                pygame.mixer.music.set_volume(0.55)
+                self.music_available = True
+        except pygame.error:
+            self.music_available = False
+
+    def _start_music_if_needed(self) -> None:
+        if self.state != "playing" or not self.music_enabled or not self.music_available:
+            return
+        if not pygame.mixer.music.get_busy():
+            pygame.mixer.music.play(-1)
+
+    def _stop_music(self) -> None:
+        if self.music_available and pygame.mixer.music.get_busy():
+            pygame.mixer.music.stop()
+
+    def toggle_music(self) -> None:
+        self.music_enabled = not self.music_enabled
+        if not self.music_enabled:
+            self._stop_music()
+        else:
+            self._start_music_if_needed()
+
+    def activate_menu_option(self, option_index: int) -> None:
+        option = self.menu.options[option_index]
+        if option == "Játék indítása":
+            self.start_game()
+        elif option == "Névjegy":
+            self.state = "about"
+            self._stop_music()
+        else:
+            self.running = False
+
+    def start_game(self) -> None:
+        self.state = "playing"
+        self.dialogue.hide()
+        self.dialogue.show(INTRO_TEXT)
+        self._start_music_if_needed()
+
+    def draw_music_status(self) -> None:
+        if self.state != "playing":
+            return
+        if not self.music_path_found:
+            text = "Zene: a dallam.wav hiányzik az assets mappából"
+        elif not self.music_available:
+            text = "Zene: a hangrendszer nem elérhető"
+        else:
+            text = f"Zene: {'BE' if self.music_enabled else 'KI'}  [M]"
+        surface = self.music_font.render(text, True, (234, 238, 255))
+        bg = pygame.Surface((surface.get_width() + 18, surface.get_height() + 12), pygame.SRCALPHA)
+        pygame.draw.rect(bg, (8, 12, 34, 120), bg.get_rect(), border_radius=14)
+        x = self.config.width - bg.get_width() - 22
+        y = 18
+        self.screen.blit(bg, (x, y))
+        self.screen.blit(surface, (x + 9, y + 6))
 
     def controls_enabled(self) -> bool:
         return (
@@ -1536,6 +1793,13 @@ class Game:
             self.thought_bubble.hide_immediately()
             self.dialogue.show(BUSH_COLLAPSE_TEXT)
 
+    def draw_intro(self) -> None:
+        if self.state == "about":
+            self.menu.draw_about(self.screen, self.music_enabled, self.music_available, self.music_path_found)
+        else:
+            self.menu.draw_menu(self.screen)
+        pygame.display.flip()
+
     def draw_help(self) -> None:
         if self._help_surface is None or self._help_bg is None:
             return
@@ -1566,6 +1830,7 @@ class Game:
             self.willpower.draw(self.screen, wp_anchor)
         if not self.dark_challenge.is_visible():
             self.draw_help()
+        self.draw_music_status()
         self.dialogue.draw(self.screen)
         pygame.display.flip()
 
@@ -1576,17 +1841,57 @@ class Game:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
-                elif event.type == pygame.KEYDOWN:
+                    continue
+
+                if self.state != "playing":
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            if self.state == "about":
+                                self.state = "menu"
+                            else:
+                                self.running = False
+                        elif self.state == "menu":
+                            if event.key in (pygame.K_UP, pygame.K_w):
+                                self.menu.move_selection(-1)
+                            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                                self.menu.move_selection(1)
+                            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                                self.activate_menu_option(self.menu.selected_index)
+                        elif self.state == "about" and event.key in (pygame.K_RETURN, pygame.K_BACKSPACE):
+                            self.state = "menu"
+                    elif self.state == "menu" and event.type == pygame.MOUSEMOTION:
+                        hovered = self.menu.option_at(event.pos)
+                        if hovered is not None:
+                            self.menu.selected_index = hovered
+                    elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if self.state == "menu":
+                            clicked = self.menu.option_at(event.pos)
+                            if clicked is not None:
+                                self.menu.selected_index = clicked
+                                self.activate_menu_option(clicked)
+                        elif self.state == "about":
+                            self.state = "menu"
+                    continue
+
+                if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.running = False
                     elif event.key == pygame.K_RETURN and self.dialogue.active and not self.game_over:
                         self.dialogue.hide()
+                    elif event.key == pygame.K_m:
+                        self.toggle_music()
                 elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
                     if self.dark_challenge.handle_event(event):
                         self.dark_solved = True
                         self.thought_bubble.hide_immediately()
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         self.handle_mouse_click(event.pos)
+
+            if self.state != "playing":
+                self.draw_intro()
+                continue
+
+            self._start_music_if_needed()
 
             # Akadály-trigger ellenőrzés: csak az aktuálisan releváns akadály.
             if not self.game_over:
@@ -1633,6 +1938,7 @@ class Game:
             self.willpower.update(wp_target, dt)
             self.update_camera(dt)
             self.draw()
+        self._stop_music()
         pygame.quit()
 
     def _update_lake_hold(self, dt: float) -> None:
