@@ -599,7 +599,7 @@ class IntroMenuScreen:
 
         menu_scale = self.menu_scale
         panel_w = int(self.config.width * 0.44)
-        panel_h = int(self.config.height * 0.46)
+        panel_h = int(self.config.height * 0.42)
         panel_rect = pygame.Rect(int(self.config.width * 0.08), int(self.config.height * 0.20), panel_w, panel_h)
         corner_radius = max(18, int(28 * menu_scale))
 
@@ -700,7 +700,6 @@ class IntroMenuScreen:
             "Irányítás játék közben: A/D vagy nyilak a mozgáshoz, Space/W/Fel az ugráshoz, Enter az üzenetek bezárásához.",
             f"Zene: M billentyűvel kapcsolható ki vagy be. Jelenleg: {music_text}; állapot: {availability_text}.",
             "A dallam végtelenítve szól, ha az assets könyvtárban megtalálható a dallam.wav fájl.",
-            "Vissza a menübe: Esc, Backspace vagy Enter.",
         ]
         max_width = panel_rect.width - 70
         y = panel_rect.y + 108
