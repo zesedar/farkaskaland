@@ -94,6 +94,14 @@ PEAK_CLIMB_SCREENS = 4.2  # ennyi képernyőnyit kell felfelé ugrálni
 PEAK_VERTICAL_CAMERA_BIAS = 0.62  # a kamera a játékost ennyi magasra tartja a képernyőn (0=fent, 1=lent)
 PEAK_VERTICAL_DEADZONE = 0.32  # ekkora "deadzone" a talaj feletti relatív magasság, amíg nem indul scroll
 
+# Hatodik (és záró) jelenet a csúcson: a farkas leül és felidézi a Göncöl szekér csillagképet,
+# amit a játékosnak le kell rajzolnia.
+SITTING_FRAME_FILENAME = "ulelorenez.png"  # opcionális assets fájl - ha nincs, fallback frame
+CONSTELLATION_INTRO_TEXT = "Emlékszem egy csillagképre, egy szekérről..."
+CONSTELLATION_COMPLETE_TEXT = "Pont olyan, amilyennek emlékeztem rá."
+CONSTELLATION_STAR_HIT_TOLERANCE_BASE = 48  # kb. ekkora sugárban kell áthúzni a csillagot
+CONSTELLATION_LINE_WIDTH_BASE = 3
+
 MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
 
@@ -1763,6 +1771,223 @@ class RockyPeak:
             plat.draw(screen, camera_x, camera_y)
 
 
+class ConstellationChallenge:
+    """Záró kihívás a csúcson: a játékosnak egyetlen folyamatos mozdulattal
+    össze kell kötnie a Göncöl szekér 7 csillagát.
+
+    A csillagok fix pozícióban láthatók a képernyőn (nem sötétített háttéren!),
+    a játékos pedig egy mozdulattal végighúzza a kurzort rajtuk a megfelelő
+    sorrendben. A "szekér-test" 4 csillagát követi 3 további csillag a "rúdra".
+    Két irányban is rajzolható: a szekér-test bal-alsó csillagából indulva
+    a rúd vége felé, vagy fordítva.
+    """
+
+    def __init__(self, config: WorldConfig) -> None:
+        self.config = config
+        self.active = False
+        self.solved = False
+        self.drawing = False
+        self.points: list[tuple[int, int]] = []
+        self.next_star_index = 0
+        self.direction = 0  # 0=ismeretlen, 1=előre (0..6), -1=hátra (6..0)
+        self.completion_pulse_t = 0.0
+        # Skálázás a képernyőhöz
+        scale_x = max(0.85, min(1.4, config.width / 1280))
+        scale_y = max(0.85, min(1.4, config.height / 720))
+        self.tolerance = max(38, int(CONSTELLATION_STAR_HIT_TOLERANCE_BASE
+                                     * min(scale_x, scale_y)))
+        self.line_width = max(2, int(CONSTELLATION_LINE_WIDTH_BASE * scale_y))
+        # Csillagok pozíciója a képernyő felső felében, középre igazítva.
+        # Nem pont a tetején, hogy elférjen körülötte vizuális tér is.
+        cx = config.width // 2
+        cy = int(config.height * 0.34)
+
+        def s(dx: float, dy: float) -> tuple[int, int]:
+            return (int(cx + dx * scale_x), int(cy + dy * scale_y))
+
+        self.stars: list[tuple[int, int]] = [
+            s(-300, +75),   # 0: szekér bal-lent
+            s(-300, -90),   # 1: szekér bal-fent
+            s(-105, -90),   # 2: szekér jobb-fent
+            s(-105, +75),   # 3: szekér jobb-lent (ide csatlakozik a rúd)
+            s(+85,  +35),   # 4: rúd 1 (Alioth)
+            s(+225, -10),   # 5: rúd 2 (Mizar) - enyhe felfelé ív
+            s(+385, -65),   # 6: rúd 3 / Alkaid (vége)
+        ]
+        self.completed: list[bool] = [False] * len(self.stars)
+
+    def start(self) -> None:
+        self.active = True
+        self.solved = False
+        self.drawing = False
+        self.points.clear()
+        self.next_star_index = 0
+        self.direction = 0
+        self.completion_pulse_t = 0.0
+        self.completed = [False] * len(self.stars)
+
+    def is_visible(self) -> bool:
+        return self.active
+
+    def blocks_controls(self) -> bool:
+        return self.active and not self.solved
+
+    def update(self, dt: float) -> None:
+        if self.solved:
+            self.completion_pulse_t += dt
+
+    def begin_stroke(self, pos: tuple[int, int]) -> None:
+        if not self.active or self.solved:
+            return
+        self.drawing = True
+        self.points = [pos]
+        self._check_star_hit(pos)
+
+    def add_point(self, pos: tuple[int, int]) -> bool:
+        if not self.active or self.solved or not self.drawing:
+            return False
+        if self.points:
+            last_x, last_y = self.points[-1]
+            dx = pos[0] - last_x
+            dy = pos[1] - last_y
+            if dx * dx + dy * dy < 9:  # legalább 3 px mozgás
+                return False
+        self.points.append(pos)
+        if len(self.points) > 800:
+            self.points = self.points[-800:]
+        self._check_star_hit(pos)
+        return self.solved
+
+    def _check_star_hit(self, pos: tuple[int, int]) -> None:
+        """Megnézi, hogy az aktuális pont eltalálja-e a soron következő csillagot.
+
+        Az első találat határozza meg a rajzolási irányt: ha a 0. csillagot éri
+        el először, előre megy a sorozaton; ha a 6.-at, fordítva. Bármi más
+        kezdés esetén a két végponton várjuk az első találatot.
+        """
+        if self.direction == 0:
+            # Még nincs irány - nézzük mind a két végpontot
+            d_first_sq = self._dist_sq(pos, self.stars[0])
+            d_last_sq = self._dist_sq(pos, self.stars[-1])
+            tol_sq = self.tolerance * self.tolerance
+            if d_first_sq <= tol_sq and d_first_sq <= d_last_sq:
+                self.direction = 1
+                self.completed[0] = True
+                self.next_star_index = 1
+            elif d_last_sq <= tol_sq:
+                self.direction = -1
+                self.completed[-1] = True
+                self.next_star_index = len(self.stars) - 2
+            return
+        # Irány már megvan - csak a következő csillagot vizsgáljuk
+        if 0 <= self.next_star_index < len(self.stars):
+            star = self.stars[self.next_star_index]
+            if self._dist_sq(pos, star) <= self.tolerance * self.tolerance:
+                self.completed[self.next_star_index] = True
+                self.next_star_index += self.direction
+                # Megoldás-ellenőrzés
+                if self.direction == 1 and self.next_star_index >= len(self.stars):
+                    self.solved = True
+                elif self.direction == -1 and self.next_star_index < 0:
+                    self.solved = True
+
+    @staticmethod
+    def _dist_sq(a: tuple[int, int], b: tuple[int, int]) -> float:
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return dx * dx + dy * dy
+
+    def end_stroke(self) -> bool:
+        # A mozdulat-vég nem reseteli a haladást; a játékos folytathatja egy
+        # új lehúzással ott, ahol abbahagyta. (Csak abbahagyja az aktív rajzolást.)
+        self.drawing = False
+        return self.solved
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        """True-val tér vissza, ha az esemény megoldotta a kihívást."""
+        if not self.active or self.solved:
+            return False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.begin_stroke(event.pos)
+            return self.solved
+        if event.type == pygame.MOUSEMOTION:
+            # Mint a kereszt-kihívásnál: nem kötelező lenyomva tartani a gombot.
+            if not self.drawing:
+                self.begin_stroke(event.pos)
+            return self.add_point(event.pos)
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            return self.end_stroke()
+        return False
+
+    def draw(self, screen: pygame.Surface) -> None:
+        if not self.active:
+            return
+        # 1) Befejezett összekötő-vonalak (csillagról csillagra) - ezek tartósak.
+        completed_count = sum(1 for c in self.completed if c)
+        if completed_count >= 2:
+            if self.direction == 1:
+                line_pts = self.stars[:completed_count]
+            elif self.direction == -1:
+                # Hátrafelé: a végéről indulva
+                line_pts = self.stars[len(self.stars) - completed_count:][::-1]
+            else:
+                line_pts = []
+            if len(line_pts) >= 2:
+                pygame.draw.lines(screen, (235, 248, 255), False, line_pts,
+                                  self.line_width)
+                # Halvány glow a vonalak körül
+                pygame.draw.lines(screen, (165, 195, 245), False, line_pts,
+                                  max(1, self.line_width - 1))
+
+        # 2) Az aktuális rajzolás-nyom (a kurzor mozgása) - lényegesen halványabb
+        # mint a befejezett vonalak, de még mindig látható segítség.
+        if len(self.points) >= 2 and not self.solved:
+            pygame.draw.lines(screen, (200, 220, 255), False, self.points,
+                              max(1, self.line_width - 1))
+            # A legfrissebb pontok ragyognak picit jobban
+            for p in self.points[-6:]:
+                pygame.draw.circle(screen, (240, 245, 255), p,
+                                   max(2, self.line_width))
+
+        # 3) Csillagok megjelenítése - különböző állapotok:
+        #    - befejezett: világos, fényes csillag halóval
+        #    - "soron következő": pulzáló célpont
+        #    - várakozó: halvány, szerény csillag
+        ticks_ms = pygame.time.get_ticks()
+        pulse = 0.5 + 0.5 * math.sin(ticks_ms * 0.006)
+        for i, (sx, sy) in enumerate(self.stars):
+            done = self.completed[i]
+            is_next = (i == self.next_star_index) and not self.solved and self.direction != 0
+            # Kezdő pont jelölés (0 vagy 6) ha még nincs irány - mindkét végpont pulzál
+            is_start_candidate = (self.direction == 0 and i in (0, len(self.stars) - 1)
+                                  and not self.solved)
+            if done:
+                # Fényes csillag halóval
+                pygame.draw.circle(screen, (160, 180, 220), (sx, sy), 12)
+                pygame.draw.circle(screen, (240, 248, 255), (sx, sy), 7)
+                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 3)
+            elif is_next or is_start_candidate:
+                # Pulzáló cél
+                radius = int(9 + pulse * 5)
+                pygame.draw.circle(screen, (180, 210, 255), (sx, sy),
+                                   radius, 2)
+                pygame.draw.circle(screen, (235, 245, 255), (sx, sy), 5)
+                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 2)
+            else:
+                # Halvány, várakozó csillag
+                pygame.draw.circle(screen, (155, 175, 220), (sx, sy), 6)
+                pygame.draw.circle(screen, (210, 220, 245), (sx, sy), 3)
+
+        # 4) Megoldás után rövid pulzáló glow az egész alakzaton
+        if self.solved:
+            ts = self.completion_pulse_t
+            glow = (math.sin(ts * 4.0) * 0.5 + 0.5)
+            for sx, sy in self.stars:
+                radius = int(14 + glow * 6)
+                # Halvány, áttetsző glow réteg - direct rajzolás opaque színnel
+                pygame.draw.circle(screen, (130, 165, 220), (sx, sy), radius, 1)
+
+
 class Player:
     def __init__(self, config: WorldConfig) -> None:
         self.config = config
@@ -1777,6 +2002,17 @@ class Player:
                 self.jump_frames = [self.run_frames[0], self.run_frames[len(self.run_frames) // 4], self.run_frames[len(self.run_frames) // 2], self.run_frames[-1]]
         except Exception:
             self.run_frames, self.stop_frames, self.jump_frames = create_placeholder_wolf_frames(SPRITE_HEIGHT)
+        # Külön ülő kép (ulelorenez.png) - ha az assets könyvtárban megtalálható, betöltjük.
+        # Ezt a 6. jelenetben használjuk, amikor a csúcson megpihen a farkas.
+        # Ha nincs ilyen fájl, fallback: az utolsó stop frame (idle pozíció).
+        sitting_path = asset_dir / SITTING_FRAME_FILENAME
+        if sitting_path.exists():
+            try:
+                self.sitting_frame = load_frame_file(sitting_path, SPRITE_HEIGHT)
+            except Exception:
+                self.sitting_frame = self.stop_frames[-1]
+        else:
+            self.sitting_frame = self.stop_frames[-1]
         self.world_x = float(self.config.left_frame_x + 140)
         self.y = float(self.config.ground_top_y)
         self.vx = 0.0
@@ -1872,6 +2108,11 @@ class Player:
             self.y = new_y
 
     def update_animation(self, dt: float) -> None:
+        # Az "ülő" állapot fix - nem váltunk át belőle automatikusan,
+        # csak külső start_animation hívással lehet kilépni belőle.
+        if self.animation_state == "sitting":
+            self.was_movement_pressed = False
+            return
         if not self.on_ground:
             self.start_animation("jump")
             self.set_jump_phase("up" if self.vy < 0 else "down")
@@ -1911,7 +2152,9 @@ class Player:
         return self.jump_frames[frame_index]
 
     def current_image(self) -> pygame.Surface:
-        if self.animation_state == "jump":
+        if self.animation_state == "sitting":
+            image = self.sitting_frame
+        elif self.animation_state == "jump":
             image = self.current_jump_image()
         elif self.animation_state == "run":
             image = self.run_frames[int(self.animation_timer / ANIMATION_FRAME_TIME) % len(self.run_frames)]
@@ -1994,6 +2237,15 @@ class Game:
                               scale=scale, screen_height=self.config.height)
         self.peak_event_triggered = False
         self.peak_solved = False
+        # 6. jelenet: csillagkép - a farkas a csúcson ülve felidézi a Göncölt.
+        # A workflow szakaszai:
+        #   "idle"     - még nem ért fel
+        #   "sit"      - leült, dialog mutatja a "Mostmár tisztán látom..." szöveget
+        #   "memory"   - dialog mutatja a "Emlékszem egy csillagképre..." szöveget
+        #   "drawing"  - a csillagkép-kihívás aktív
+        #   "done"     - kész, dialog mutatja a befejező szöveget
+        self.constellation = ConstellationChallenge(self.config)
+        self.constellation_phase = "idle"
         self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         self.music_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.025)), bold=True)
@@ -2086,6 +2338,8 @@ class Game:
             and not self.cinematic_camera_active
             and not self.log_camera_transition_active
             and not self.dark_challenge.blocks_controls()
+            and not self.constellation.blocks_controls()
+            and self.constellation_phase in ("idle", "done")
         )
 
     def movement_blocked(self) -> bool:
@@ -2376,9 +2630,14 @@ class Game:
         if self.lake_event_triggered and not self.lake_solved:
             wp_anchor = (player_screen_x, player_top_y - 18)
             self.willpower.draw(self.screen, wp_anchor)
-        if self.state == "playing" and not self.dialogue.active and not self.dark_challenge.is_visible():
+        if (self.state == "playing" and not self.dialogue.active
+            and not self.dark_challenge.is_visible()
+            and not self.constellation.is_visible()):
             self.draw_help()
         self.draw_music_status()
+        # Csillagkép-kihívás: a háttér-csillagok és platformok FÖLÉ rajzolva,
+        # de a dialógus ALATT - hogy az emlékezető-szöveg ne legyen takarva.
+        self.constellation.draw(self.screen)
         self.dialogue.draw(self.screen)
         pygame.display.flip()
 
@@ -2432,6 +2691,8 @@ class Game:
                     if self.dark_challenge.handle_event(event):
                         self.dark_solved = True
                         self.thought_bubble.hide_immediately()
+                    elif self.constellation.active and not self.constellation.solved:
+                        self.constellation.handle_event(event)
                     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                         self.handle_mouse_click(event.pos)
 
@@ -2488,13 +2749,35 @@ class Game:
                 self.thought_bubble.show(DARKNESS_HINT_TEXT)
             if self.dark_challenge.solved:
                 self.dark_solved = True
-            # Csúcs elérése: ha a játékos a sziklacsúcs tetején áll, megoldás.
+            # Csillagkép-kihívás frissítése
+            self.constellation.update(dt)
+            # Detektáljuk, ha most fejezte be (drawing → completed_pending átmenet)
+            if self.constellation_phase == "drawing" and self.constellation.solved:
+                # A megoldás után rövid pulzáló csillag-glow effekt látható,
+                # majd jön a befejező dialógus. A pulzálási idő után átkapcsolunk.
+                if self.constellation.completion_pulse_t >= 1.4:
+                    self.constellation.active = False
+                    self.constellation_phase = "completed_pending"
+            # Csúcs elérése: a játékos felért, leültetjük és megkezdjük a záró
+            # jelenetet. A peak_solved most azt jelzi, hogy felértünk - az ezt
+            # követő constellation_phase átmenetek vezetik tovább a jelenetet.
             if (self.peak_event_triggered and not self.peak_solved
                 and self.peak.is_on_summit(self.player.world_x, self.player.y, self.player.on_ground)):
                 self.peak_solved = True
                 self.peak.solved = True
                 self.thought_bubble.hide_immediately()
+                # Megállítjuk a játékost és átkapcsolunk az ülő képkockára.
+                self.player.vx = 0.0
+                self.player.vy = 0.0
+                self.player.movement_pressed = False
+                self.player.was_movement_pressed = False
+                # A megfelelő irányú ülés: a játékos arrafelé néz, amerre éppen
+                # a csúcs felé haladt - ezt a `facing_right` már tartja.
+                self.player.start_animation("sitting")
+                self.constellation_phase = "sit"
                 self.dialogue.show(PEAK_SUCCESS_TEXT)
+            # Constellation fázis-átmenetek: a dialógus záródásakor lépünk tovább.
+            self._update_constellation_phase()
             self.thought_bubble.update(dt)
             # A willpower-sáv csak akkor "él", ha aktív tó-akadály van.
             wp_target = (self.lake_hold_timer / LAKE_HOLD_DURATION
@@ -2505,6 +2788,38 @@ class Game:
             self.draw()
         self._stop_music()
         pygame.quit()
+
+    def _update_constellation_phase(self) -> None:
+        """Vezeti a 6. (záró) jelenet fázis-átmeneteit.
+
+        A fázisok mindig egy dialógus-bezárás után lépnek tovább. A
+        `peak_solved=True` az első ilyen átmenet előfeltétele (csak akkor
+        kezdődik, ha a játékos felért és leült).
+        """
+        if not self.peak_solved:
+            return
+        if self.dialogue.active:
+            return
+        if self.constellation_phase == "sit":
+            # Az első dialógust ("Mostmár tisztán látom...") a játékos becsukta.
+            # Most jön a memory-szöveg.
+            self.dialogue.show(CONSTELLATION_INTRO_TEXT)
+            self.constellation_phase = "memory"
+            return
+        if self.constellation_phase == "memory":
+            # A memory-szöveget is elolvasta - induljon a csillag-rajzolás.
+            self.constellation.start()
+            self.constellation_phase = "drawing"
+            return
+        if self.constellation_phase == "drawing":
+            # A drawing fázisból a constellation.solved figyelése lépteti tovább
+            # (a run() ciklusban). Itt nincs teendő.
+            return
+        if self.constellation_phase == "completed_pending":
+            # A megoldás után rövid pulzáló glow látszott, most a befejező szöveg.
+            self.dialogue.show(CONSTELLATION_COMPLETE_TEXT)
+            self.constellation_phase = "done"
+            return
 
     def _update_lake_hold(self, dt: float) -> None:
         """A tó-puzzle "csökönyös jobbra-nyomás" számláló kezelése.
