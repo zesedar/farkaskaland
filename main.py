@@ -322,6 +322,13 @@ class StaticBackground:
         self.config = config
         self.background = self._load_background()
         self.ground_tile = self._create_ground_tile()
+        # Az "égbolt-folytatás" a sziklacsúcs jelenethez: amikor a kamera felfelé
+        # mozdul, a háttérkép is lecsúszik, és felül egy hézag keletkezik. Ezt
+        # egy magas, csillagos, lilás-fekete gradient tölti ki, ami pontosan a
+        # háttér felső pixelsorához illeszkedik (mintavételezés alapján), így
+        # a varrat észrevétlen.
+        ext_height = max(3500, int(self.config.height * 5.0))
+        self.sky_extension = self._build_sky_extension(ext_height)
 
     def _load_background(self) -> pygame.Surface:
         candidates = [
@@ -383,8 +390,106 @@ class StaticBackground:
             pygame.draw.circle(surface, flower, (flower_x + 5, cap_h - 1), 2)
         return surface
 
-    def draw_sky(self, screen: pygame.Surface) -> None:
-        screen.blit(self.background, (0, 0))
+    def _build_sky_extension(self, height: int) -> pygame.Surface:
+        """Csillagos, lilás-fekete gradient, amit a háttérkép FÖLÉ rajzolunk
+        amikor a kamera felfelé mozog (sziklacsúcs jelenet).
+
+        A felület alja pontosan a háttér legfelső pixelsorának ÁTLAGOLT színét
+        tükrözi, így varrat-mentes az átmenet. Felfelé fokozatosan a sötét éjszaka
+        színhez (mély lila-fekete) olvad át, sűrűsödő csillag-mezővel.
+        """
+        bg_w = self.background.get_width()
+        # NO-alpha felület: gyors, minden pixel átlátszatlan, és a screen.blit()
+        # tisztán RGB-másolást csinál - nincs alfa-blendelési bonyodalom.
+        surf = pygame.Surface((bg_w, height))
+
+        # Háttér felső sorának mintavételezése (átlag) - ehhez illesztjük az alsó színt
+        samples: list[tuple[int, int, int]] = []
+        for i in range(20):
+            sx = int(i * (bg_w - 1) / 19)
+            r, g, b = self.background.get_at((sx, 0))[:3]
+            samples.append((r, g, b))
+        bot_r = sum(s[0] for s in samples) // len(samples)
+        bot_g = sum(s[1] for s in samples) // len(samples)
+        bot_b = sum(s[2] for s in samples) // len(samples)
+        bottom_color = pygame.Color(bot_r, bot_g, bot_b)
+        # Felül: nagyon mély éjszaka, kissé lilás árnyalattal (hogy ne legyen "halott" fekete)
+        top_color = pygame.Color(5, 7, 26)
+
+        # Vertikális gradient. Power-curve: az alsó harmadban gyorsan a háttér
+        # színéhez közeledik, a felső kétharmadban lassan sötétedik el.
+        for y in range(height):
+            t = y / max(1, height - 1)
+            eased = t ** 0.85
+            color = top_color.lerp(bottom_color, eased)
+            pygame.draw.line(surf, color, (0, y), (bg_w, y))
+
+        # Csillagok: a "fényesség"-et a SZÍN intenzitásával állítjuk, nem alfával
+        # (no-alpha felület van). Halvány csillag = sötétebb szín, közelebb a
+        # gradient-hez; fényes csillag = majdnem fehér.
+        rng = random.Random(31415)
+        area = bg_w * height
+        star_count = max(160, area // 4500)
+        for _ in range(star_count):
+            x = rng.randint(0, bg_w - 1)
+            # Kissé bias a magasabb területekre, de mindenhol vannak
+            y = int((rng.random() ** 0.85) * (height - 4))
+            height_factor = 1.0 - (y / max(1, height))  # 0=alul, 1=felül
+            roll = rng.random()
+            big_chance = 0.07 + height_factor * 0.07
+            med_chance = 0.42 + height_factor * 0.15
+            if roll < big_chance:
+                radius = 3
+                shade = rng.randint(225, 255)
+            elif roll < med_chance:
+                radius = 2
+                shade = rng.randint(170, 225)
+            else:
+                radius = 1
+                shade = rng.randint(115, 175)
+            # Enyhe kék/lila árnyalat - holdfényes éjszaka érzet
+            color = (shade, shade, min(255, shade + 18))
+            pygame.draw.circle(surf, color, (x, y), radius)
+
+        # Csillagcsoportok (galaxis-szerű sűrűsödések) - a felső 60%-ban néhány
+        # helyen sűrűbb csillagmezőket teszünk, ami élővé és változatossá teszi
+        # az eget. Nem kör, nem felhő - csak több csillag egy körzetben.
+        for _ in range(max(4, height // 600)):
+            cluster_cx = rng.randint(int(bg_w * 0.05), int(bg_w * 0.95))
+            cluster_cy = rng.randint(int(height * 0.04), int(height * 0.55))
+            cluster_r = rng.randint(int(bg_w * 0.05), int(bg_w * 0.11))
+            cluster_count = rng.randint(20, 38)
+            for _ in range(cluster_count):
+                # Gauss-szerű eloszlás a középpont körül
+                ox = int((rng.random() + rng.random() - 1) * cluster_r)
+                oy = int((rng.random() + rng.random() - 1) * cluster_r * 0.7)
+                cx_pt = cluster_cx + ox
+                cy_pt = cluster_cy + oy
+                if 0 <= cx_pt < bg_w and 0 <= cy_pt < height:
+                    cs = rng.randint(155, 230)
+                    cr = 1 if rng.random() > 0.18 else 2
+                    pygame.draw.circle(surf, (cs, cs, min(255, cs + 18)),
+                                       (cx_pt, cy_pt), cr)
+
+        return surf
+
+    def draw_sky(self, screen: pygame.Surface, camera_y: float = 0.0) -> None:
+        # A háttérkép a sziklacsúcs jelenetben TALAJSZINTHEZ van rögzítve világtérben,
+        # tehát ahogy a kamera felfelé úszik, a kép is "lejjebb" csúszik a képernyőn.
+        bg_y = round(-camera_y)
+        # Ha a kamera felfelé mozdult (camera_y < 0), a háttér felett egy üres rész
+        # marad - ezt tölti ki a sky_extension.
+        if camera_y < -0.5:
+            ext_h = self.sky_extension.get_height()
+            ext_y = bg_y - ext_h
+            # Csak akkor blittolunk, ha az extension legalább részben látható
+            if ext_y < self.config.height and ext_y + ext_h > 0:
+                screen.blit(self.sky_extension, (0, ext_y))
+            else:
+                # A camera_y olyan magas, hogy az extension is teljesen kicsúszott
+                # - ekkor a teljes képernyő legyen sötét lila/fekete (legrosszabb eset).
+                screen.fill((5, 7, 26))
+        screen.blit(self.background, (0, bg_y))
 
     def draw_ground(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         tile_width = self.ground_tile.get_width()
@@ -2245,7 +2350,7 @@ class Game:
       self.screen.blit(self._help_surface, (29, 25))
 
     def draw(self) -> None:
-        self.background.draw_sky(self.screen)
+        self.background.draw_sky(self.screen, self.camera_y)
         # Sziklacsúcs jelenet háttér-rétege (csillagok + sziluett) - az ég után, minden más elé
         self.peak.draw_silhouette(self.screen, self.camera_x, self.camera_y)
         self.bush.draw(self.screen, self.camera_x)
