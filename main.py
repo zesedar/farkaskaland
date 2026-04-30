@@ -81,6 +81,17 @@ CROSS_GESTURE_MIN_SPAN_BASE = 145
 CROSS_GESTURE_TOLERANCE_BASE = 18
 CROSS_GESTURE_MIN_POINTS = 18
 
+# Ötödik kihívás: sziklacsúcs platform-ugrálással.
+PEAK_CHALLENGE_WORLD_X = 9700  # ötödik kihívás triggerpontja, a sötétség után
+PEAK_BASE_OFFSET_X = 420  # mennyivel jobbra az első kocka a triggertől (sétáltatós átmenet)
+PEAK_INTRO_TEXT = "Fel kell jutnom a csúcsra, hogy lássam a csillagokat."
+PEAK_SUCCESS_TEXT = "Mostmár tisztán látom a csillagokat."
+PEAK_BLOCKED_HINT_TEXT = "Csak a csúcs felé vezet az út..."
+PEAK_WALL_OFFSET = 1850  # base_x utáni eltolás, ahol a láthatatlan fal blokkolja a haladást
+PEAK_BLOCK_WIDTH_BASE = 158  # alap kocka-szélesség (skálázódik)
+PEAK_BLOCK_HEIGHT_BASE = 28
+PEAK_SUMMIT_DETECT_TOLERANCE = 1.6  # mennyire kell pontosan a csúcs tetején állni
+
 MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
 
@@ -1343,6 +1354,216 @@ class DarknessSignChallenge:
         screen.blit(overlay, (0, 0))
 
 
+class Platform:
+    """Egyetlen ugró-kocka a sziklacsúcs jelenetben (egyirányú platform - csak felülről áll meg)."""
+
+    def __init__(self, left: float, top_y: float, width: int,
+                 height: int = PEAK_BLOCK_HEIGHT_BASE, is_summit: bool = False) -> None:
+        self.left = float(left)
+        self.top_y = float(top_y)
+        self.width = int(width)
+        self.height = int(height)
+        self.right = self.left + self.width
+        self.is_summit = is_summit
+        self.surface = self._build_surface()
+
+    def _build_surface(self) -> pygame.Surface:
+        w = self.width
+        h = self.height
+        surf = pygame.Surface((w + 16, h + 18), pygame.SRCALPHA)
+        if self.is_summit:
+            base_color = (78, 96, 158)
+            edge_color = (208, 222, 255)
+            highlight = (228, 238, 255)
+            crack_color = (32, 40, 84)
+            shadow_color = (16, 22, 56, 145)
+        else:
+            base_color = (52, 64, 110)
+            edge_color = (158, 186, 240)
+            highlight = (204, 220, 252)
+            crack_color = (24, 30, 70)
+            shadow_color = (12, 18, 46, 130)
+        # Halvány "leheletszerű" árnyék a kocka alatt
+        shadow_surf = pygame.Surface((w + 16, 12), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow_surf, shadow_color, shadow_surf.get_rect())
+        surf.blit(shadow_surf, (0, h + 4))
+        body_rect = pygame.Rect(8, 4, w, h)
+        pygame.draw.rect(surf, base_color, body_rect, border_radius=7)
+        # Felső megvilágított perem - holdfény
+        pygame.draw.rect(surf, edge_color, (8, 4, w, 5), border_radius=5)
+        pygame.draw.line(surf, highlight, (12, 6), (8 + w - 5, 6), 1)
+        # Körvonal
+        pygame.draw.rect(surf, edge_color, body_rect, 2, border_radius=7)
+        # Néhány halvány szikla-repedés (deterministic seed a kocka pozíciója alapján)
+        rng = random.Random(int(self.left * 31 + self.top_y * 7) & 0xFFFFFF)
+        crack_count = 4 if self.is_summit else 3
+        for _ in range(crack_count):
+            cx = rng.randint(12, max(13, w - 4))
+            cy = rng.randint(10, max(11, h - 3))
+            length = rng.randint(4, 11)
+            pygame.draw.line(surf, crack_color, (cx, cy), (cx + length, cy + 1), 1)
+        if self.is_summit:
+            # Apró fény-csillanás a csúcson
+            pygame.draw.circle(surf, (235, 245, 255, 200),
+                               (8 + w // 2, 7), 3)
+        return surf
+
+    def contains_x(self, world_x: float) -> bool:
+        return self.left <= world_x <= self.right
+
+    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+        screen_x = round(self.left - camera_x) - 8
+        screen_y = round(self.top_y) - 4
+        screen.blit(self.surface, (screen_x, screen_y))
+
+
+class RockyPeak:
+    """Ötödik akadály: apró kockákon kell felugrálni egy sziklacsúcsra."""
+
+    def __init__(self, base_x: float, ground_y: int, scale: float = 1.0) -> None:
+        self.base_x = float(base_x)
+        self.ground_y = int(ground_y)
+        self.scale = scale
+        self.active = False
+        self.solved = False
+        block_w = max(110, int(PEAK_BLOCK_WIDTH_BASE * scale))
+        # (rel_x_a base-től, magasság a talaj felett)
+        # A magasság-különbségek (kb. 70-80 px) jól ugorhatóak.
+        # A vízszintes távolságok (~200 px) is belül vannak a JUMP_SPEED+PLAYER_SPEED ívben.
+        steps = [
+            (0,    62),
+            (200,  132),
+            (405,  205),
+            (615,  278),
+            (820,  350),
+            (1030, 422),
+            (1240, 495),
+        ]
+        self.platforms: list[Platform] = []
+        for rel_x, height_above in steps:
+            left = self.base_x + int(rel_x * scale)
+            top = self.ground_y - int(height_above * scale)
+            self.platforms.append(Platform(left, top, block_w))
+        # Sziklacsúcs: szélesebb, magasabb platform a tetején
+        summit_w = max(170, int(220 * scale))
+        summit_left = self.base_x + int(1455 * scale)
+        summit_top = self.ground_y - int(575 * scale)
+        self.summit = Platform(summit_left, summit_top, summit_w,
+                               height=int(PEAK_BLOCK_HEIGHT_BASE * 1.25),
+                               is_summit=True)
+        self.platforms.append(self.summit)
+        # A világbeli "fal" - a játékos nem sétálhat el a csúcs alatt a talajon.
+        self.wall_world_x = self.base_x + int(PEAK_WALL_OFFSET * scale)
+        # Háttér-sziluett (nagy szikla a kockák mögött)
+        self.silhouette = self._build_silhouette()
+        # Csillagos overlay (a csúcs felett a sötét égbolt csillagai)
+        self.stars = self._build_stars()
+        self.intro_summit_x = self.base_x
+
+    def _build_silhouette(self) -> pygame.Surface:
+        w = max(1100, int(2000 * self.scale))
+        h = max(560, int(780 * self.scale))
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        rng = random.Random(2026)
+        # Három réteg mélységérzethez: a leghátsó a leglaposabb és legsötétebb
+        layers = [
+            ((18, 22, 60, 215),  0.00, 1.00, 70),
+            ((28, 36, 84, 195), 0.05, 0.92, 55),
+            ((40, 52, 108, 170), 0.10, 0.82, 40),
+        ]
+        for color, ox_factor, sy_factor, jag in layers:
+            ox = int(w * ox_factor)
+            base_y = h
+            peak_y = int(h * (1.0 - sy_factor))
+            mid_x = int(w * 0.55) + ox
+            points = [(0, base_y)]
+            x = 0
+            while x < w:
+                step = rng.randint(35, 95)
+                x += step
+                t = max(0.0, 1.0 - abs(x - mid_x) / (w * 0.55))
+                local_jag = rng.randint(-jag // 2, jag)
+                y = int(base_y - (base_y - peak_y) * (t ** 1.45) + local_jag)
+                y = max(peak_y - 30, min(base_y, y))
+                points.append((min(x, w), y))
+            points.append((w, base_y))
+            pygame.draw.polygon(surf, color, points)
+        # Apró hó-csillanások a legmagasabb pontok körül
+        for _ in range(18):
+            sx = int(w * 0.5) + rng.randint(-int(w * 0.18), int(w * 0.18))
+            sy = int(h * 0.18) + rng.randint(0, int(h * 0.10))
+            pygame.draw.circle(surf, (210, 220, 250, 130), (sx, sy), rng.randint(2, 4))
+        return surf
+
+    def _build_stars(self) -> pygame.Surface:
+        w = max(1100, int(2000 * self.scale))
+        h = max(360, int(520 * self.scale))
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        rng = random.Random(7777)
+        for _ in range(140):
+            x = rng.randint(0, w - 1)
+            y = rng.randint(0, h - 1)
+            shade = rng.randint(200, 255)
+            radius = rng.randint(1, 2) if rng.random() > 0.12 else 3
+            alpha = rng.randint(160, 240) if radius < 3 else 245
+            pygame.draw.circle(surf, (shade, shade, 255, alpha), (x, y), radius)
+        return surf
+
+    def trigger_x(self) -> float:
+        """A trigger MÁR a base előtt aktiválódik - a Game egy kicsivel hamarabb hívja."""
+        return self.base_x - 380
+
+    def activate(self) -> None:
+        self.active = True
+
+    def floor_y_under(self, world_x: float, current_y: float) -> float | None:
+        """A legmagasabb (legkisebb y) platform-tető, amely a játékos talpa alatt van.
+
+        Csak akkor ad vissza értéket, ha tényleg van olyan kocka, ami a játékos
+        x-koordinátája alatt és aktuális magasságánál nem feljebb található.
+        Egyirányú platformok: a feltétel `top_y >= current_y - 0.5` biztosítja,
+        hogy felfelé ugráláskor (current_y < top_y) ne kapjon "alulról" támogatást.
+        """
+        best: float | None = None
+        for plat in self.platforms:
+            if plat.contains_x(world_x) and plat.top_y >= current_y - 0.5:
+                if best is None or plat.top_y < best:
+                    best = plat.top_y
+        return best
+
+    def is_on_summit(self, world_x: float, y: float, on_ground: bool) -> bool:
+        if not on_ground:
+            return False
+        if not self.summit.contains_x(world_x):
+            return False
+        return abs(y - self.summit.top_y) <= PEAK_SUMMIT_DETECT_TOLERANCE
+
+    def player_blocked_by_wall(self, player_world_x: float, collision_half_width: float) -> bool:
+        """Igaz, ha a játékos jelenleg pont a (még zárt) sziklafalnak nyomódik."""
+        if self.solved:
+            return False
+        block_x = self.wall_world_x - collision_half_width
+        return abs(player_world_x - block_x) < 0.5
+
+    def draw_silhouette(self, screen: pygame.Surface, camera_x: float) -> None:
+        if not self.active:
+            return
+        # Csillagok (a legtávolabbi réteg) - lassú parallax (0.25)
+        star_screen_x = round(self.base_x - 350 - camera_x * 0.25)
+        star_screen_y = self.ground_y - self.silhouette.get_height() + 30
+        screen.blit(self.stars, (star_screen_x, star_screen_y))
+        # Sziklasziluett - közepesen lassú parallax (0.45)
+        sil_screen_x = round(self.base_x - 200 - camera_x * 0.45)
+        sil_screen_y = self.ground_y - self.silhouette.get_height() + 60
+        screen.blit(self.silhouette, (sil_screen_x, sil_screen_y))
+
+    def draw_platforms(self, screen: pygame.Surface, camera_x: float) -> None:
+        if not self.active:
+            return
+        for plat in self.platforms:
+            plat.draw(screen, camera_x)
+
+
 class Player:
     def __init__(self, config: WorldConfig) -> None:
         self.config = config
@@ -1420,15 +1641,36 @@ class Player:
             next_world_x = min(next_world_x, obstacle_left_edge - self.collision_half_width)
         self.world_x = next_world_x
 
-    def update_physics(self, dt: float) -> None:
+    def update_physics(self, dt: float, floor_y: float | None = None) -> None:
+        """Fizika-frissítés. floor_y átadásával egyirányú platformokra is leszállhat.
+
+        Ha floor_y nincs megadva, a régi viselkedés érvényes (csak a fő talajra ugorhat).
+        Egyirányú platform: csak felülről áll meg rajta a játékos. Felfelé ugrálva
+        átszalad alatta (mert vy<0 esetén nem landolunk), oldalról szabadon
+        áthalad (csak a contains_x szerint támogat egy adott x-pozíción).
+        Oldalvást leesés: ha a játékos a platform szélétől odébb sétál, az új x
+        alatt a floor_y már alacsonyabb (vagy a fő talaj), és kioldjuk az
+        on_ground állapotot, így gravitáció érvényre jut.
+        """
+        target_floor_y = float(self.config.ground_top_y) if floor_y is None else float(floor_y)
+        # Ha a játékos a talajon volt, de az új floor_y észrevehetően lentebb van,
+        # akkor "lesétált" a platform széléről - ne snap-eljük le, csak hadd zuhanjon.
+        if self.on_ground and self.y < target_floor_y - 0.5:
+            self.on_ground = False
         if self.on_ground:
+            # Apró float-eltérések kompenzálása: pontosan a tetejére igazítjuk.
+            if abs(self.y - target_floor_y) > 0.01:
+                self.y = target_floor_y
             return
         self.vy = min(MAX_FALL_SPEED, self.vy + GRAVITY * dt)
-        self.y += self.vy * dt
-        if self.y >= self.config.ground_top_y:
-            self.y = float(self.config.ground_top_y)
+        new_y = self.y + self.vy * dt
+        # Csak akkor landolunk, ha esés közben átléptük a felszínt (vy>0).
+        if self.vy > 0 and new_y >= target_floor_y >= self.y - 0.01:
+            self.y = target_floor_y
             self.vy = 0.0
             self.on_ground = True
+        else:
+            self.y = new_y
 
     def update_animation(self, dt: float) -> None:
         if not self.on_ground:
@@ -1541,6 +1783,11 @@ class Game:
         # Sötétség / kereszt akadály állapotai
         self.dark_event_triggered = False
         self.dark_solved = False
+        # Sziklacsúcs akadály állapotai (5. jelenet)
+        peak_base_x = float(PEAK_CHALLENGE_WORLD_X + PEAK_BASE_OFFSET_X)
+        self.peak = RockyPeak(base_x=peak_base_x, ground_y=self.config.ground_top_y, scale=scale)
+        self.peak_event_triggered = False
+        self.peak_solved = False
         self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         self.music_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.025)), bold=True)
@@ -1646,7 +1893,25 @@ class Game:
             return self.bush.left_edge
         if self.lake_event_triggered and not self.lake_solved:
             return self.lake.left_edge
+        # A sziklacsúcs jelenetben láthatatlan fal blokkolja a talajszintű
+        # tovább-sétálást, amíg a játékos nem ér fel a csúcsra. Így a kockákon
+        # át vezet az egyetlen lehetséges út.
+        if self.peak_event_triggered and not self.peak_solved:
+            return self.peak.wall_world_x
         return None
+
+    def floor_y_for_player(self) -> float:
+        """A játékos jelenlegi x-pozíciója alatt fellelhető legmagasabb támaszték y-ja.
+
+        Ha aktív a sziklacsúcs jelenet, a kockák tetejei is jelölhetnek "felszínt".
+        Egyébként a fő talaj.
+        """
+        ground_y = float(self.config.ground_top_y)
+        if self.peak_event_triggered:
+            plat_y = self.peak.floor_y_under(self.player.world_x, self.player.y)
+            if plat_y is not None and plat_y < ground_y:
+                return plat_y
+        return ground_y
 
     def is_pressed_against_lake(self) -> bool:
         """A játékos ténylegesen a tó által blokkolt helyzetben van-e?
@@ -1726,6 +1991,21 @@ class Game:
         self.thought_bubble.show(DARKNESS_HINT_TEXT)
         if self.dialogue.active:
             self.dialogue.hide()
+
+    def trigger_peak_event(self) -> None:
+        """Az 5. jelenet beindítása: aktiváljuk a sziklacsúcsot és intro üzenetet mutatunk.
+
+        A játékos a triggerpontról még tovább kell sétáljon, amíg a kockák alá ér -
+        ez ad egy természetes "rácsodálkozás" pillanatot. A láthatatlan fal akadályozza
+        meg, hogy egyszerűen elsétáljon a csúcs alatt: csak a kockákon át vezet az út.
+        """
+        self.peak_event_triggered = True
+        self.peak.activate()
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.was_movement_pressed = False
+        self.player.start_animation("idle")
+        self.dialogue.show(PEAK_INTRO_TEXT)
 
     def set_game_over(self) -> None:
         if self.game_over:
@@ -1835,11 +2115,15 @@ class Game:
 
     def draw(self) -> None:
         self.background.draw_sky(self.screen)
+        # Sziklacsúcs jelenet háttér-rétege (csillagok + sziluett) - az ég után, minden más elé
+        self.peak.draw_silhouette(self.screen, self.camera_x)
         self.bush.draw(self.screen, self.camera_x)
         self.background.draw_ground(self.screen, self.camera_x)
         # Tó a ground UTÁN, hogy lefedje a vízfelszín alatti talajt.
         self.lake.draw(self.screen, self.camera_x)
         self.rolling_log.draw(self.screen, self.camera_x)
+        # Sziklacsúcs platformjai - a talaj előtt, de a játékos mögött
+        self.peak.draw_platforms(self.screen, self.camera_x)
         self.player.draw(self.screen, self.camera_x)
         if self.dark_challenge.is_visible():
             self.dark_challenge.draw_trace(self.screen)
@@ -1933,6 +2217,9 @@ class Game:
                 elif (self.log_solved and not self.dark_event_triggered
                       and self.player.world_x >= DARK_CHALLENGE_WORLD_X):
                     self.trigger_dark_event()
+                elif (self.dark_solved and not self.peak_event_triggered
+                      and self.player.world_x >= PEAK_CHALLENGE_WORLD_X):
+                    self.trigger_peak_event()
 
             blocked = self.movement_blocked()
             self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled(), blocked)
@@ -1940,10 +2227,17 @@ class Game:
             if blocked and self.player.tried_to_move and not self.dialogue.active:
                 self.thought_bubble.show(BLOCKED_THOUGHT_TEXT)
 
+            # Sziklacsúcs jelenet: ha a játékos a falnak nyomódik, mutassunk egy hint-et.
+            if (self.peak_event_triggered and not self.peak_solved
+                and not self.dialogue.active and self.player.tried_to_move
+                and self.peak.player_blocked_by_wall(self.player.world_x, self.player.collision_half_width)
+                and self.player.on_ground):
+                self.thought_bubble.show(PEAK_BLOCKED_HINT_TEXT)
+
             # Tó: csökönyös jobbra-nyomás számolása.
             self._update_lake_hold(dt)
 
-            self.player.update_physics(dt)
+            self.player.update_physics(dt, floor_y=self.floor_y_for_player())
             self.player.update_animation(dt)
             self.bush.update(dt)
             self.lake.update(dt)
@@ -1957,6 +2251,13 @@ class Game:
                 self.thought_bubble.show(DARKNESS_HINT_TEXT)
             if self.dark_challenge.solved:
                 self.dark_solved = True
+            # Csúcs elérése: ha a játékos a sziklacsúcs tetején áll, megoldás.
+            if (self.peak_event_triggered and not self.peak_solved
+                and self.peak.is_on_summit(self.player.world_x, self.player.y, self.player.on_ground)):
+                self.peak_solved = True
+                self.peak.solved = True
+                self.thought_bubble.hide_immediately()
+                self.dialogue.show(PEAK_SUCCESS_TEXT)
             self.thought_bubble.update(dt)
             # A willpower-sáv csak akkor "él", ha aktív tó-akadály van.
             wp_target = (self.lake_hold_timer / LAKE_HOLD_DURATION
