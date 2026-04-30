@@ -1797,22 +1797,46 @@ class ConstellationChallenge:
         self.tolerance = max(38, int(CONSTELLATION_STAR_HIT_TOLERANCE_BASE
                                      * min(scale_x, scale_y)))
         self.line_width = max(2, int(CONSTELLATION_LINE_WIDTH_BASE * scale_y))
+        # Csillagok pozíciója a képernyőn. A klasszikus Göncöl szekér alakzata:
+        # bal oldalt egy közel-trapéz alakú bowl (kerekek), jobbra hosszan
+        # nyúló, lefelé hajló rúd. Sorrend (egyvonalú trace):
+        #   0: Phecda (γ) - bowl jobb-alsó
+        #   1: Merak (β)  - bowl bal-alsó
+        #   2: Dubhe (α)  - bowl bal-felső
+        #   3: Megrez (δ) - bowl jobb-felső (rúd csatlakozik)
+        #   4: Alioth (ε) - rúd 1
+        #   5: Mizar (ζ)  - rúd 2
+        #   6: Alkaid (η) - rúd vége (lefelé hajlik)
         # Csillagok pozíciója a képernyő felső felében, középre igazítva.
         # Nem pont a tetején, hogy elférjen körülötte vizuális tér is.
+        # GEOMETRIA: A J2000.0 koordinátákból (RA, Dec) kis-szögű projekcióval
+        # számolt relatív pozíciók fokokban, majd skálázva. A Göncöl szekér
+        # valódi formája egy ferde paralelogramma (a "kocsi"), amelyhez egy
+        # LEFELÉ ívelő rúd csatlakozik (Alkaid mélyen lent-balra).
+        #
+        # Sorrend (egy mozdulattal végighúzhatóan):
+        #   0: Dubhe (α UMa)   - kocsi jobb-felső, "mutató" csillag
+        #   1: Merak (β UMa)   - kocsi jobb-alsó (Dubhe alatt, picit lentebb)
+        #   2: Phecda (γ UMa)  - kocsi bal-alsó (Merak-tól balra)
+        #   3: Megrez (δ UMa)  - kocsi bal-felső, ide csatlakozik a rúd
+        #   4: Alioth (ε UMa)  - rúd 1
+        #   5: Mizar (ζ UMa)   - rúd 2
+        #   6: Alkaid (η UMa)  - rúd vége, mélyen lent-balra ível
         cx = config.width // 2
-        cy = int(config.height * 0.34)
+        cy = int(config.height * 0.45)
+        scale_factor = min(scale_x, scale_y)
 
         def s(dx: float, dy: float) -> tuple[int, int]:
-            return (int(cx + dx * scale_x), int(cy + dy * scale_y))
+            return (int(cx + dx * scale_factor), int(cy + dy * scale_factor))
 
         self.stars: list[tuple[int, int]] = [
-            s(-300, +75),   # 0: szekér bal-lent
-            s(-300, -90),   # 1: szekér bal-fent
-            s(-105, -90),   # 2: szekér jobb-fent
-            s(-105, +75),   # 3: szekér jobb-lent (ide csatlakozik a rúd)
-            s(+85,  +35),   # 4: rúd 1 (Alioth)
-            s(+225, -10),   # 5: rúd 2 (Mizar) - enyhe felfelé ív
-            s(+385, -65),   # 6: rúd 3 / Alkaid (vége)
+            s(+245, -136),   # 0: Dubhe   - kocsi jobb-felső
+            s(+250,  -18),   # 1: Merak   - kocsi jobb-alsó
+            s( +85,  +42),   # 2: Phecda  - kocsi bal-alsó
+            s( +18,  -32),   # 3: Megrez  - kocsi bal-felső
+            s(-103,   -8),   # 4: Alioth  - rúd 1
+            s(-195,  +14),   # 5: Mizar   - rúd 2
+            s(-271, +138),   # 6: Alkaid  - rúd vége (lefelé ível)
         ]
         self.completed: list[bool] = [False] * len(self.stars)
 
@@ -1922,69 +1946,49 @@ class ConstellationChallenge:
     def draw(self, screen: pygame.Surface) -> None:
         if not self.active:
             return
-        # 1) Befejezett összekötő-vonalak (csillagról csillagra) - ezek tartósak.
+        # 1) Befejezett összekötő-vonalak (csillagról csillagra) - tartósak,
+        #    végigvezetik a már megtett útvonalat.
         completed_count = sum(1 for c in self.completed if c)
         if completed_count >= 2:
             if self.direction == 1:
                 line_pts = self.stars[:completed_count]
             elif self.direction == -1:
-                # Hátrafelé: a végéről indulva
                 line_pts = self.stars[len(self.stars) - completed_count:][::-1]
             else:
                 line_pts = []
             if len(line_pts) >= 2:
                 pygame.draw.lines(screen, (235, 248, 255), False, line_pts,
                                   self.line_width)
-                # Halvány glow a vonalak körül
                 pygame.draw.lines(screen, (165, 195, 245), False, line_pts,
                                   max(1, self.line_width - 1))
 
-        # 2) Az aktuális rajzolás-nyom (a kurzor mozgása) - lényegesen halványabb
-        # mint a befejezett vonalak, de még mindig látható segítség.
+        # 2) Aktuális egér-nyom: ez az EGYETLEN feedback a játékos számára
+        #    addig, amíg el nem éri az első csillagot. Halvány, de látható
+        #    "tintacsík", ami megmutatja merre járt a kurzor.
         if len(self.points) >= 2 and not self.solved:
             pygame.draw.lines(screen, (200, 220, 255), False, self.points,
                               max(1, self.line_width - 1))
-            # A legfrissebb pontok ragyognak picit jobban
             for p in self.points[-6:]:
                 pygame.draw.circle(screen, (240, 245, 255), p,
                                    max(2, self.line_width))
 
-        # 3) Csillagok megjelenítése - különböző állapotok:
-        #    - befejezett: világos, fényes csillag halóval
-        #    - "soron következő": pulzáló célpont
-        #    - várakozó: halvány, szerény csillag
-        ticks_ms = pygame.time.get_ticks()
-        pulse = 0.5 + 0.5 * math.sin(ticks_ms * 0.006)
+        # 3) Csillagok: CSAK a már elért csillagokat rajzoljuk - az érintetlenek
+        #    láthatatlanok maradnak, ahogy azt a játékos ki kell tapasztalja
+        #    a memóriájából. (A teljes alakzat felfedezése maga a kihívás.)
         for i, (sx, sy) in enumerate(self.stars):
-            done = self.completed[i]
-            is_next = (i == self.next_star_index) and not self.solved and self.direction != 0
-            # Kezdő pont jelölés (0 vagy 6) ha még nincs irány - mindkét végpont pulzál
-            is_start_candidate = (self.direction == 0 and i in (0, len(self.stars) - 1)
-                                  and not self.solved)
-            if done:
-                # Fényes csillag halóval
-                pygame.draw.circle(screen, (160, 180, 220), (sx, sy), 12)
-                pygame.draw.circle(screen, (240, 248, 255), (sx, sy), 7)
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 3)
-            elif is_next or is_start_candidate:
-                # Pulzáló cél
-                radius = int(9 + pulse * 5)
-                pygame.draw.circle(screen, (180, 210, 255), (sx, sy),
-                                   radius, 2)
-                pygame.draw.circle(screen, (235, 245, 255), (sx, sy), 5)
-                pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 2)
-            else:
-                # Halvány, várakozó csillag
-                pygame.draw.circle(screen, (155, 175, 220), (sx, sy), 6)
-                pygame.draw.circle(screen, (210, 220, 245), (sx, sy), 3)
+            if not self.completed[i]:
+                continue
+            pygame.draw.circle(screen, (160, 180, 220), (sx, sy), 12)
+            pygame.draw.circle(screen, (240, 248, 255), (sx, sy), 7)
+            pygame.draw.circle(screen, (255, 255, 255), (sx, sy), 3)
 
-        # 4) Megoldás után rövid pulzáló glow az egész alakzaton
+        # 4) Megoldás után rövid pulzáló glow az egész alakzaton - csak ekkor
+        #    jelennek meg az összes csillagot körbevevő gyűrűk.
         if self.solved:
             ts = self.completion_pulse_t
             glow = (math.sin(ts * 4.0) * 0.5 + 0.5)
             for sx, sy in self.stars:
                 radius = int(14 + glow * 6)
-                # Halvány, áttetsző glow réteg - direct rajzolás opaque színnel
                 pygame.draw.circle(screen, (130, 165, 220), (sx, sy), radius, 1)
 
 
@@ -2008,7 +2012,10 @@ class Player:
         sitting_path = asset_dir / SITTING_FRAME_FILENAME
         if sitting_path.exists():
             try:
-                self.sitting_frame = load_frame_file(sitting_path, SPRITE_HEIGHT)
+                # ~18%-kal nagyobb mint a normál SPRITE_HEIGHT, hogy a farkas
+                # a talajon üljön és ne a levegőben (a kép aljának üres
+                # tartománya így lefelé tolódik a talajszint alá).
+                self.sitting_frame = load_frame_file(sitting_path, int(SPRITE_HEIGHT * 1.18))
             except Exception:
                 self.sitting_frame = self.stop_frames[-1]
         else:
@@ -2182,7 +2189,11 @@ class Player:
         if -50 <= shadow_y_screen <= screen.get_height() + 50:
             pygame.draw.ellipse(screen, (33, 27, 72), shadow_rect)
         image = self.current_image()
-        rect = image.get_rect(midbottom=(screen_x, screen_y))
+        # Sitting állapotban kis lefelé-tolás: az ülő pozícióban a farkas
+        # "fenék-vonala" picit a talaj alá kerül, így vizuálisan tényleg
+        # ráül a felszínre, nem lebeg felette.
+        sitting_offset = 10 if self.animation_state == "sitting" else 0
+        rect = image.get_rect(midbottom=(screen_x, screen_y + sitting_offset))
         screen.blit(image, rect)
 
 
