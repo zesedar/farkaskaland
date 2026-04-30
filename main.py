@@ -87,10 +87,12 @@ PEAK_BASE_OFFSET_X = 420  # mennyivel jobbra az első kocka a triggertől (sét�
 PEAK_INTRO_TEXT = "Fel kell jutnom a csúcsra, hogy lássam a csillagokat."
 PEAK_SUCCESS_TEXT = "Mostmár tisztán látom a csillagokat."
 PEAK_BLOCKED_HINT_TEXT = "Csak a csúcs felé vezet az út..."
-PEAK_WALL_OFFSET = 1850  # base_x utáni eltolás, ahol a láthatatlan fal blokkolja a haladást
-PEAK_BLOCK_WIDTH_BASE = 158  # alap kocka-szélesség (skálázódik)
-PEAK_BLOCK_HEIGHT_BASE = 28
+PEAK_BLOCK_WIDTH_BASE = 110  # alap kocka-szélesség (keskeny - skálázódik)
+PEAK_BLOCK_HEIGHT_BASE = 26
 PEAK_SUMMIT_DETECT_TOLERANCE = 1.6  # mennyire kell pontosan a csúcs tetején állni
+PEAK_CLIMB_SCREENS = 4.2  # ennyi képernyőnyit kell felfelé ugrálni
+PEAK_VERTICAL_CAMERA_BIAS = 0.62  # a kamera a játékost ennyi magasra tartja a képernyőn (0=fent, 1=lent)
+PEAK_VERTICAL_DEADZONE = 0.32  # ekkora "deadzone" a talaj feletti relatív magasság, amíg nem indul scroll
 
 MAX_FRAME_DT = 0.05  # frame-spike clamp, hogy ne ugorjon a játék
 
@@ -384,10 +386,13 @@ class StaticBackground:
     def draw_sky(self, screen: pygame.Surface) -> None:
         screen.blit(self.background, (0, 0))
 
-    def draw_ground(self, screen: pygame.Surface, camera_x: float) -> None:
+    def draw_ground(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         tile_width = self.ground_tile.get_width()
         start_x = -int(camera_x % tile_width) - tile_width
-        y = self.config.ground_top_y - 2
+        y = self.config.ground_top_y - 2 - camera_y
+        # Ha a talaj-csík teljesen kívül van a képernyőn (magasan járunk), ne is rajzoljuk.
+        if y > self.config.height + 10 or y + self.ground_tile.get_height() < -10:
+            return
         for x in range(start_x, self.config.width + tile_width, tile_width):
             screen.blit(self.ground_tile, (x, y))
 
@@ -1411,65 +1416,126 @@ class Platform:
     def contains_x(self, world_x: float) -> bool:
         return self.left <= world_x <= self.right
 
-    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+    def draw(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         screen_x = round(self.left - camera_x) - 8
-        screen_y = round(self.top_y) - 4
+        screen_y = round(self.top_y - camera_y) - 4
         screen.blit(self.surface, (screen_x, screen_y))
 
 
 class RockyPeak:
-    """Ötödik akadály: apró kockákon kell felugrálni egy sziklacsúcsra."""
+    """Ötödik akadály: apró kockákon kell felugrálni egy magas sziklacsúcsra.
 
-    def __init__(self, base_x: float, ground_y: int, scale: float = 1.0) -> None:
+    A pálya kb. 4-5 képernyőnyi magas, függőlegesen variált útvonal.
+    A kamera vertikálisan is követi a játékost, így a következő kocka mindig
+    látható. A blokkok keskenyek (alap 110 px) és gyakran átfedik egymást
+    vízszintesen, így a függőleges felugrálás a fő mechanika.
+    """
+
+    def __init__(self, base_x: float, ground_y: int, scale: float = 1.0,
+                 screen_height: int = 720) -> None:
         self.base_x = float(base_x)
         self.ground_y = int(ground_y)
         self.scale = scale
+        self.screen_height = screen_height
         self.active = False
         self.solved = False
-        block_w = max(110, int(PEAK_BLOCK_WIDTH_BASE * scale))
-        # (rel_x_a base-től, magasság a talaj felett)
-        # A magasság-különbségek (kb. 70-80 px) jól ugorhatóak.
-        # A vízszintes távolságok (~200 px) is belül vannak a JUMP_SPEED+PLAYER_SPEED ívben.
-        steps = [
-            (0,    62),
-            (200,  132),
-            (405,  205),
-            (615,  278),
-            (820,  350),
-            (1030, 422),
-            (1240, 495),
-        ]
+        target_climb_height = max(2400, int(screen_height * PEAK_CLIMB_SCREENS))
+        layout, total_height = self._generate_layout(scale, target_climb_height)
         self.platforms: list[Platform] = []
-        for rel_x, height_above in steps:
-            left = self.base_x + int(rel_x * scale)
-            top = self.ground_y - int(height_above * scale)
-            self.platforms.append(Platform(left, top, block_w))
-        # Sziklacsúcs: szélesebb, magasabb platform a tetején
+        for rel_x, height_above, w in layout:
+            left = self.base_x + rel_x
+            top = self.ground_y - height_above
+            self.platforms.append(Platform(left, top, w))
+        # A sziklacsúcs - utolsó, szélesebb és magasabban a legfelsőnél.
+        last_rel_x, last_height, last_w = layout[-1]
         summit_w = max(170, int(220 * scale))
-        summit_left = self.base_x + int(1455 * scale)
-        summit_top = self.ground_y - int(575 * scale)
+        # A csúcs a legutolsó kocka középvonala fölé igazítva, de a kockánál
+        # szélesebb, így a játékos kényelmesen tud landolni.
+        summit_rel_x = last_rel_x + (last_w - summit_w) // 2
+        summit_height = last_height + max(60, int(72 * scale))
+        summit_left = self.base_x + summit_rel_x
+        summit_top = self.ground_y - summit_height
         self.summit = Platform(summit_left, summit_top, summit_w,
-                               height=int(PEAK_BLOCK_HEIGHT_BASE * 1.25),
+                               height=int(PEAK_BLOCK_HEIGHT_BASE * 1.30),
                                is_summit=True)
         self.platforms.append(self.summit)
-        # A világbeli "fal" - a játékos nem sétálhat el a csúcs alatt a talajon.
-        self.wall_world_x = self.base_x + int(PEAK_WALL_OFFSET * scale)
-        # Háttér-sziluett (nagy szikla a kockák mögött)
+        self.summit_height = summit_height
+        # Láthatatlan szikla-fal a talajon, a kockáktól jobbra.
+        # Csak a kockákon át lehet feljutni / továbbjutni.
+        max_x = max(p.right for p in self.platforms) + max(80, int(120 * scale))
+        self.wall_world_x = max_x
+        # Háttérrétegek: hegy-sziluett és csillagok
         self.silhouette = self._build_silhouette()
-        # Csillagos overlay (a csúcs felett a sötét égbolt csillagai)
-        self.stars = self._build_stars()
-        self.intro_summit_x = self.base_x
+        # A csillagokat egy listában tároljuk (rel_x, height_above_ground, radius, shade)
+        # - sokkal hatékonyabb mint egy óriási előre-renderelt felület.
+        self.stars = self._build_stars_data()
+
+    def _generate_layout(self, scale: float, target_climb_height: int):
+        """Procedurálisan generál egy variált felfelé vezető útvonalat (deterministic).
+
+        A blokkok jellemzően átfedik egymást vízszintesen (h_offset < block_w),
+        így a játékos egyszerű "felugrás egyenesen" technikával is feljebb juthat.
+        Időnként nagyobb oldalsó eltolások (kis átfedés) levegő-irányítást
+        igényelnek, ami változatossá teszi a mászást.
+
+        Visszaadja: ((rel_x, height_above_ground, width), ...), total_height
+        """
+        rng = random.Random(20260)
+        block_w = max(78, int(PEAK_BLOCK_WIDTH_BASE * scale))
+        v_step_avg = max(58, int(70 * scale))
+        num_steps = max(30, target_climb_height // v_step_avg)
+        # A vízszintes "pszeudo-középvonal" - a kockák ekörül cikkcakkolnak.
+        rel_x = 0
+        height_above = max(50, int(56 * scale))
+        sign = 1
+        layout: list[tuple[int, int, int]] = []
+        for i in range(num_steps):
+            layout.append((rel_x, height_above, block_w))
+            # Függőleges lépés: enyhe variancia, hogy ne legyen mechanikus.
+            v_step = rng.randint(int(v_step_avg * 0.85), int(v_step_avg * 1.18))
+            height_above += v_step
+            # Vízszintes minta-választás: 4-féle közül.
+            roll = rng.random()
+            if roll < 0.32:
+                # Közvetlen átfedés - majdnem teljesen függőleges felugrás.
+                h_offset = rng.randint(-int(22 * scale), int(22 * scale))
+            elif roll < 0.58:
+                # Kis oldalra-csúszás (jó átfedés).
+                h_offset = int(rng.randint(28, 50) * scale) * sign
+                sign *= -1
+            elif roll < 0.84:
+                # Mérsékelt oldalra-lépés (kisebb átfedés).
+                h_offset = int(rng.randint(50, 75) * scale) * sign
+                sign *= -1
+            else:
+                # Nagyobb oldal-ugrás - levegő-irányítás kell, kis vagy nincs átfedés.
+                h_offset = int(rng.randint(75, 95) * scale) * sign
+                sign *= -1
+            rel_x += h_offset
+            # Tartsuk a vízszintes drift-et viszonylag korlátok közt, hogy a
+            # sziluett mögötte mindig kompozícióban maradjon.
+            if rel_x > int(550 * scale):
+                rel_x = int(540 * scale)
+                sign = -1
+            elif rel_x < int(-450 * scale):
+                rel_x = int(-440 * scale)
+                sign = 1
+        return layout, height_above
 
     def _build_silhouette(self) -> pygame.Surface:
-        w = max(1100, int(2000 * self.scale))
-        h = max(560, int(780 * self.scale))
+        """Hegy-sziluett a kockák mögött. Magas, hogy a mászás nagy részét lefedje."""
+        scale = self.scale
+        w = max(1500, int(2400 * scale))
+        # A magasság kb. 1500-1800 px. Ennél magasabban már csak csillagok látszanak,
+        # ahogy "a hegy fölé emelkedik" a játékos - ez vizuálisan helyes.
+        h = max(1100, int(1700 * scale))
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
-        rng = random.Random(2026)
-        # Három réteg mélységérzethez: a leghátsó a leglaposabb és legsötétebb
+        rng = random.Random(2027)
+        # Három réteg mélységérzethez
         layers = [
-            ((18, 22, 60, 215),  0.00, 1.00, 70),
-            ((28, 36, 84, 195), 0.05, 0.92, 55),
-            ((40, 52, 108, 170), 0.10, 0.82, 40),
+            ((16, 22, 58, 220),  0.00, 1.00, 65),
+            ((26, 34, 80, 200),  0.05, 0.90, 50),
+            ((40, 52, 106, 170), 0.12, 0.78, 38),
         ]
         for color, ox_factor, sy_factor, jag in layers:
             ox = int(w * ox_factor)
@@ -1479,51 +1545,58 @@ class RockyPeak:
             points = [(0, base_y)]
             x = 0
             while x < w:
-                step = rng.randint(35, 95)
+                step = rng.randint(38, 100)
                 x += step
                 t = max(0.0, 1.0 - abs(x - mid_x) / (w * 0.55))
                 local_jag = rng.randint(-jag // 2, jag)
-                y = int(base_y - (base_y - peak_y) * (t ** 1.45) + local_jag)
-                y = max(peak_y - 30, min(base_y, y))
+                y = int(base_y - (base_y - peak_y) * (t ** 1.55) + local_jag)
+                y = max(peak_y - 25, min(base_y, y))
                 points.append((min(x, w), y))
             points.append((w, base_y))
             pygame.draw.polygon(surf, color, points)
-        # Apró hó-csillanások a legmagasabb pontok körül
-        for _ in range(18):
-            sx = int(w * 0.5) + rng.randint(-int(w * 0.18), int(w * 0.18))
-            sy = int(h * 0.18) + rng.randint(0, int(h * 0.10))
+        # Hó-csillanások a magasabb pontok körül
+        for _ in range(28):
+            sx = int(w * 0.5) + rng.randint(-int(w * 0.20), int(w * 0.20))
+            sy = int(h * 0.08) + rng.randint(0, int(h * 0.12))
             pygame.draw.circle(surf, (210, 220, 250, 130), (sx, sy), rng.randint(2, 4))
         return surf
 
-    def _build_stars(self) -> pygame.Surface:
-        w = max(1100, int(2000 * self.scale))
-        h = max(360, int(520 * self.scale))
-        surf = pygame.Surface((w, h), pygame.SRCALPHA)
-        rng = random.Random(7777)
-        for _ in range(140):
-            x = rng.randint(0, w - 1)
-            y = rng.randint(0, h - 1)
-            shade = rng.randint(200, 255)
-            radius = rng.randint(1, 2) if rng.random() > 0.12 else 3
-            alpha = rng.randint(160, 240) if radius < 3 else 245
-            pygame.draw.circle(surf, (shade, shade, 255, alpha), (x, y), radius)
-        return surf
+    def _build_stars_data(self) -> list[tuple[int, int, int, int, int]]:
+        """Csillagok mint (rel_x, height_above_ground, radius, shade, alpha) tuplek.
 
-    def trigger_x(self) -> float:
-        """A trigger MÁR a base előtt aktiválódik - a Game egy kicsivel hamarabb hívja."""
-        return self.base_x - 380
+        Egy lista - a draw során direkt rajzoljuk őket. Lefedi a teljes mászási
+        területet, beleértve a csúcs feletti "égbolt" tartományt is.
+        """
+        scale = self.scale
+        rng = random.Random(7777)
+        # Vízszintes kiterjedés: a kockák szélességét lefedi, plusz buffer.
+        x_min = int(-450 * scale)
+        x_max = int(self.wall_world_x - self.base_x + 350 * scale)
+        # Függőleges: a talajtól a csúcs felett még 350 px-ig.
+        y_max_above = self.summit_height + max(280, int(380 * scale))
+        # Sűrűség: arányosan a területtel
+        area = (x_max - x_min) * y_max_above
+        count = max(180, int(area / 5800))
+        stars: list[tuple[int, int, int, int, int]] = []
+        for _ in range(count):
+            rx = rng.randint(x_min, x_max)
+            # Magasságfüggő bias: minél magasabb, annál sűrűbb csillag.
+            ry_factor = rng.random() ** 0.55
+            ry = int(40 + ry_factor * (y_max_above - 40))
+            # Néha nagyobb csillag (ritkább)
+            r = rng.randint(1, 2)
+            if rng.random() < 0.08:
+                r = 3
+            shade = rng.randint(195, 255)
+            alpha = rng.randint(150, 240)
+            stars.append((rx, ry, r, shade, alpha))
+        return stars
 
     def activate(self) -> None:
         self.active = True
 
     def floor_y_under(self, world_x: float, current_y: float) -> float | None:
-        """A legmagasabb (legkisebb y) platform-tető, amely a játékos talpa alatt van.
-
-        Csak akkor ad vissza értéket, ha tényleg van olyan kocka, ami a játékos
-        x-koordinátája alatt és aktuális magasságánál nem feljebb található.
-        Egyirányú platformok: a feltétel `top_y >= current_y - 0.5` biztosítja,
-        hogy felfelé ugráláskor (current_y < top_y) ne kapjon "alulról" támogatást.
-        """
+        """A legmagasabb (legkisebb y) platform-tető, amely a játékos talpa alatt van."""
         best: float | None = None
         for plat in self.platforms:
             if plat.contains_x(world_x) and plat.top_y >= current_y - 0.5:
@@ -1545,23 +1618,44 @@ class RockyPeak:
         block_x = self.wall_world_x - collision_half_width
         return abs(player_world_x - block_x) < 0.5
 
-    def draw_silhouette(self, screen: pygame.Surface, camera_x: float) -> None:
+    def draw_silhouette(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         if not self.active:
             return
-        # Csillagok (a legtávolabbi réteg) - lassú parallax (0.25)
-        star_screen_x = round(self.base_x - 350 - camera_x * 0.25)
-        star_screen_y = self.ground_y - self.silhouette.get_height() + 30
-        screen.blit(self.stars, (star_screen_x, star_screen_y))
-        # Sziklasziluett - közepesen lassú parallax (0.45)
-        sil_screen_x = round(self.base_x - 200 - camera_x * 0.45)
-        sil_screen_y = self.ground_y - self.silhouette.get_height() + 60
-        screen.blit(self.silhouette, (sil_screen_x, sil_screen_y))
+        screen_w = screen.get_width()
+        screen_h = screen.get_height()
+        # Csillagok: a legtávolabbi réteg, lassú parallax mind X-ben, mind Y-ban.
+        # Direkt rajz: kis, gyors körök. Egyszerűbb mint óriási felület-cache.
+        star_parallax_x = 0.30
+        star_parallax_y = 0.20
+        for rx, ry, radius, shade, alpha in self.stars:
+            world_x = self.base_x + rx
+            world_y = self.ground_y - ry
+            sx = round(world_x - camera_x * star_parallax_x)
+            sy = round(world_y - camera_y * star_parallax_y)
+            # Csak a látható csillagokat rajzoljuk
+            if -3 <= sx < screen_w + 3 and -3 <= sy < screen_h + 3:
+                color = (shade, shade, min(255, shade + 8))
+                if radius >= 3:
+                    # Nagyobb csillaghoz halvány glow-aura
+                    pygame.draw.circle(screen, (shade // 2, shade // 2, shade), (sx, sy), radius + 1)
+                pygame.draw.circle(screen, color, (sx, sy), radius)
+        # Hegy-sziluett: közepes parallax (0.42), így csak akkor "marad alul",
+        # ahogy felfelé mászunk - természetes érzet.
+        sil_parallax = 0.42
+        sil_screen_x = round(self.base_x - 350 * self.scale - camera_x * sil_parallax)
+        sil_screen_y = round(self.ground_y - self.silhouette.get_height() - camera_y * sil_parallax)
+        # Csak akkor blittolunk, ha a sziluett legalább részben látható.
+        if (sil_screen_y < screen_h
+            and sil_screen_y + self.silhouette.get_height() > 0
+            and sil_screen_x < screen_w
+            and sil_screen_x + self.silhouette.get_width() > 0):
+            screen.blit(self.silhouette, (sil_screen_x, sil_screen_y))
 
-    def draw_platforms(self, screen: pygame.Surface, camera_x: float) -> None:
+    def draw_platforms(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         if not self.active:
             return
         for plat in self.platforms:
-            plat.draw(screen, camera_x)
+            plat.draw(screen, camera_x, camera_y)
 
 
 class Player:
@@ -1724,18 +1818,23 @@ class Player:
             image = pygame.transform.flip(image, True, False)
         return image
 
-    def draw(self, screen: pygame.Surface, camera_x: float) -> None:
+    def draw(self, screen: pygame.Surface, camera_x: float, camera_y: float = 0.0) -> None:
         # round() használata int() helyett: subpixel-stutter csökkentése.
         # int() truncate-ol, így 0.999-ről 1.001-re átlépéskor 1 px ugrás van;
         # round() szimmetrikus, és a kamera-floathoz konzisztensebb.
         screen_x = round(self.world_x - camera_x)
+        screen_y = round(self.y - camera_y)
         height_above_ground = max(0.0, self.config.ground_top_y - self.y)
         shadow_scale = max(0.42, 1.0 - height_above_ground / 270.0)
         shadow_rect = pygame.Rect(0, 0, int(96 * shadow_scale), int(16 * shadow_scale))
-        shadow_rect.center = (screen_x, self.config.ground_top_y + 8)
-        pygame.draw.ellipse(screen, (33, 27, 72), shadow_rect)
+        # Az árnyék a TALAJ szintjén marad világkoordinátában - kameraval együtt mozog.
+        shadow_y_screen = round(self.config.ground_top_y + 8 - camera_y)
+        shadow_rect.center = (screen_x, shadow_y_screen)
+        # Ne pazaroljunk rajzolást, ha az árnyék már messze a képernyőn kívül van.
+        if -50 <= shadow_y_screen <= screen.get_height() + 50:
+            pygame.draw.ellipse(screen, (33, 27, 72), shadow_rect)
         image = self.current_image()
-        rect = image.get_rect(midbottom=(screen_x, round(self.y)))
+        rect = image.get_rect(midbottom=(screen_x, screen_y))
         screen.blit(image, rect)
 
 
@@ -1765,6 +1864,7 @@ class Game:
         self.rolling_log = RollingLog(ground_y=self.config.ground_top_y, scale=scale)
         self.dark_challenge = DarknessSignChallenge(self.config)
         self.camera_x = 0.0
+        self.camera_y = 0.0  # vertikális kamera-eltolás (csak a sziklacsúcs jelenetben mozog)
         self.cinematic_camera_active = False
         self.cinematic_camera_target_x = 0.0
         self.pending_obstacle_text = ""
@@ -1785,7 +1885,8 @@ class Game:
         self.dark_solved = False
         # Sziklacsúcs akadály állapotai (5. jelenet)
         peak_base_x = float(PEAK_CHALLENGE_WORLD_X + PEAK_BASE_OFFSET_X)
-        self.peak = RockyPeak(base_x=peak_base_x, ground_y=self.config.ground_top_y, scale=scale)
+        self.peak = RockyPeak(base_x=peak_base_x, ground_y=self.config.ground_top_y,
+                              scale=scale, screen_height=self.config.height)
         self.peak_event_triggered = False
         self.peak_solved = False
         self.game_over = False
@@ -2053,12 +2154,40 @@ class Game:
         self.camera_x += distance * smooth_factor
         return True
 
+    def _target_camera_y(self) -> float:
+        """A vertikális kamera célpozíciója.
+
+        Csak a sziklacsúcs jelenetben mozog: amikor a játékos a "deadzone" felett
+        van (a talajtól számítva több mint PEAK_VERTICAL_DEADZONE * képernyőmagasság),
+        a kamera követi felfelé. Egyébként 0 (nincs scroll).
+        """
+        if not self.peak_event_triggered:
+            return 0.0
+        deadzone_height = self.config.height * PEAK_VERTICAL_DEADZONE
+        target_screen_y = int(self.config.height * PEAK_VERTICAL_CAMERA_BIAS)
+        # Ha a játékos még a deadzone-on belül van (a talaj közelében), nincs scroll.
+        if self.player.y >= self.config.ground_top_y - deadzone_height:
+            return 0.0
+        # Egyébként a kamera úgy csúszik, hogy a játékos kb. a képernyő felső
+        # részén-középén legyen, így mindig látszódjon, mi következik felfelé.
+        raw = self.player.y - target_screen_y
+        # Ne mehessen lefelé (camera_y > 0 lefelé scroll lenne, az itt nem értelmes).
+        return min(0.0, raw)
+
+    def _update_camera_y(self, dt: float) -> None:
+        target = self._target_camera_y()
+        smooth = 1.0 - math.exp(-self.config.camera_smoothness * dt)
+        self.camera_y += (target - self.camera_y) * smooth
+
     def update_camera(self, dt: float) -> None:
         if self.update_cinematic_camera(dt):
+            self._update_camera_y(dt)
             return
         if self.update_log_camera_transition(dt):
+            self._update_camera_y(dt)
             return
         if self.dialogue.active:
+            self._update_camera_y(dt)
             return
         if self.log_event_triggered and not self.log_solved and not self.game_over:
             # A harmadik kihívás alatt a kamera a farkast tartja középen,
@@ -2067,6 +2196,7 @@ class Game:
             target_camera_x = self.centered_camera_x_for_player()
             smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
             self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
+            self._update_camera_y(dt)
             return
         screen_x = self.player.world_x - self.camera_x
         target_camera_x = self.camera_x
@@ -2081,6 +2211,7 @@ class Game:
         target_camera_x = max(0.0, target_camera_x)
         smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
         self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
+        self._update_camera_y(dt)
 
     def handle_mouse_click(self, mouse_pos: tuple[int, int]) -> None:
         """Egér-kattintás kezelése: a bozót weak spotjának keresése."""
@@ -2116,21 +2247,22 @@ class Game:
     def draw(self) -> None:
         self.background.draw_sky(self.screen)
         # Sziklacsúcs jelenet háttér-rétege (csillagok + sziluett) - az ég után, minden más elé
-        self.peak.draw_silhouette(self.screen, self.camera_x)
+        self.peak.draw_silhouette(self.screen, self.camera_x, self.camera_y)
         self.bush.draw(self.screen, self.camera_x)
-        self.background.draw_ground(self.screen, self.camera_x)
+        self.background.draw_ground(self.screen, self.camera_x, self.camera_y)
         # Tó a ground UTÁN, hogy lefedje a vízfelszín alatti talajt.
         self.lake.draw(self.screen, self.camera_x)
         self.rolling_log.draw(self.screen, self.camera_x)
         # Sziklacsúcs platformjai - a talaj előtt, de a játékos mögött
-        self.peak.draw_platforms(self.screen, self.camera_x)
-        self.player.draw(self.screen, self.camera_x)
+        self.peak.draw_platforms(self.screen, self.camera_x, self.camera_y)
+        self.player.draw(self.screen, self.camera_x, self.camera_y)
         if self.dark_challenge.is_visible():
             self.dark_challenge.draw_trace(self.screen)
             self.dark_challenge.draw_darkness(self.screen, pygame.mouse.get_pos())
         # Vizuális overlay-k a játékos feje fölött:
         player_screen_x = round(self.player.world_x - self.camera_x)
-        player_top_y = round(self.player.y) - SPRITE_HEIGHT
+        player_screen_y = round(self.player.y - self.camera_y)
+        player_top_y = player_screen_y - SPRITE_HEIGHT
         # Gondolatfelhő anchor: a farkas közepétől kicsit JOBBRA, fej magasságában.
         # A buborék MAGA jobbra-fent jelenik meg, a tail bal-lefelé visszamutat.
         bubble_anchor = (player_screen_x + 5, player_top_y + 35)
