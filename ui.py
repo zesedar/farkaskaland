@@ -181,7 +181,7 @@ class IntroMenuScreen:
         self.quote_font = pygame.font.SysFont("arial", max(20, int(config.height * 0.025)), italic=True)
         self.option_rects: list[pygame.Rect] = []
         self.background = self._load_background()
-        self.wolf_art = self._load_wolf_art()
+
 
     def _load_background(self) -> pygame.Surface:
         candidates = [
@@ -217,22 +217,6 @@ class IntroMenuScreen:
             pygame.draw.circle(fallback, (shade, shade, 255), (x, y), radius)
         return fallback
 
-    def _load_wolf_art(self) -> pygame.Surface | None:
-        candidates = [
-            Path(__file__).parent / "assets" / "menu_wolf.png",
-            Path("/mnt/data/ghostwriter_images/context/956dca34-f53d-5e3a-af9c-824288cfb066.png"),
-        ]
-        source = next((path for path in candidates if path.exists()), None)
-        if source is None:
-            return None
-        try:
-            image = pygame.image.load(str(source)).convert_alpha()
-            target_h = max(140, int(self.config.height * 0.24))
-            scale = target_h / max(1, image.get_height())
-            target_w = max(1, int(image.get_width() * scale))
-            return pygame.transform.smoothscale(image, (target_w, target_h))
-        except Exception:
-            return None
 
     def move_selection(self, delta: int) -> None:
         self.selected_index = (self.selected_index + delta) % len(self.options)
@@ -313,15 +297,6 @@ class IntroMenuScreen:
         )
         screen.blit(moon_quote, moon_quote_rect)
 
-        if self.wolf_art is not None:
-            wolf = self.wolf_art.copy()
-            wolf.set_alpha(244)
-            wolf_rect = wolf.get_rect(bottomright=(self.config.width - 86, self.config.height - 76))
-            glow_rect = wolf_rect.inflate(70, 52)
-            glow = pygame.Surface(glow_rect.size, pygame.SRCALPHA)
-            pygame.draw.ellipse(glow, (138, 98, 238, 70), glow.get_rect())
-            screen.blit(glow, glow_rect.topleft)
-            screen.blit(wolf, wolf_rect)
 
     def draw_about(self, screen: pygame.Surface, music_enabled: bool, music_available: bool, music_path_found: bool) -> None:
         screen.blit(self.background, (0, 0))
