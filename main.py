@@ -120,6 +120,7 @@ class Game:
         self.wind = WindChallenge(self.config, ground_y=self.config.ground_top_y, scale=scale)
         self.wind_event_triggered = False
         self.wind_solved = False
+        self.wind_outro_active = False
         self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         self.music_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.025)), bold=True)
@@ -590,6 +591,8 @@ class Game:
                         self.running = False
                     elif event.key == pygame.K_RETURN and self.dialogue.active and not self.game_over:
                         self.dialogue.hide()
+                        if self.wind_outro_active:
+                            self.running = False
                     elif event.key == pygame.K_m:
                         self.toggle_music()
                 elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
@@ -668,8 +671,13 @@ class Game:
                 if not self.game_over and not self.dialogue.active:
                     if self.wind.reached_cave(self.player.world_x):
                         self.wind_solved = True
+                        self.wind_outro_active = True
                         self.wind.solve()
-                        self.dialogue.show(WIND_SUCCESS_TEXT)
+                        self.player.vx = 0.0
+                        self.player.movement_pressed = False
+                        self.player.was_movement_pressed = False
+                        self.player.start_animation("idle")
+                        self.dialogue.show(WIND_SUCCESS_TEXT, hint_text="Enter - kilépés")
                     elif self.wind.collides_with_player(self.player):
                         self.set_game_over(WIND_GAME_OVER_TEXT)
 

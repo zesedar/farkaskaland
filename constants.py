@@ -108,7 +108,10 @@ CONSTELLATION_LINE_WIDTH_BASE = 3
 # --- 7. jelenet: szél és barlang ---
 WIND_CHALLENGE_WORLD_X = 11250
 WIND_INTRO_TEXT = "Sietnem kell"
-WIND_SUCCESS_TEXT = "Elértem az otthont!"
+WIND_SUCCESS_TEXT = (
+    "Gratulálok! Győztél! Egy időre megtaláltad a békédet, "
+    "de lehet még sokkal több rejtély vár rád a jővőben!"
+)
 WIND_GAME_OVER_TEXT = "Játék vége! Az ág elsodort."
 
 WIND_CAVE_DISTANCE = 2700
