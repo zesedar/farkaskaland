@@ -38,6 +38,10 @@ from constants import (
     PEAK_BASE_OFFSET_X,
     PEAK_VERTICAL_CAMERA_BIAS,
     PEAK_VERTICAL_DEADZONE,
+    WIND_CHALLENGE_WORLD_X,
+    WIND_INTRO_TEXT,
+    WIND_SUCCESS_TEXT,
+    WIND_GAME_OVER_TEXT,
 )
 from world_config import WorldConfig
 from player import Player
@@ -49,6 +53,7 @@ from scenes.log import RollingLog
 from scenes.darkness import DarknessSignChallenge
 from scenes.peak import RockyPeak
 from scenes.constellation import ConstellationChallenge
+from scenes.szel import WindChallenge
 
 
 class Game:
@@ -111,6 +116,10 @@ class Game:
         #   "done"     - kész, dialog mutatja a befejező szöveget
         self.constellation = ConstellationChallenge(self.config)
         self.constellation_phase = "idle"
+        # 7. jelenet: Szél - jobbról érkező ágak, a végén barlangbejárat.
+        self.wind = WindChallenge(self.config, ground_y=self.config.ground_top_y, scale=scale)
+        self.wind_event_triggered = False
+        self.wind_solved = False
         self.game_over = False
         self.debug_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.024)))
         self.music_font = pygame.font.SysFont("arial", max(18, int(self.config.height * 0.025)), bold=True)
@@ -332,7 +341,28 @@ class Game:
         self.player.start_animation("idle")
         self.dialogue.show(PEAK_INTRO_TEXT)
 
-    def set_game_over(self) -> None:
+    def trigger_wind_event(self) -> None:
+        """A 7. jelenet indítása a Göncöl-szekér jelenet lezárása után."""
+        self.wind_event_triggered = True
+        self.wind_solved = False
+        self.player.vx = 0.0
+        self.player.movement_pressed = False
+        self.player.was_movement_pressed = False
+        self.player.start_animation("idle")
+        self.thought_bubble.hide_immediately()
+
+        if self.dialogue.active:
+            self.dialogue.hide()
+
+        self.wind.start(
+            self.player.world_x,
+            self.camera_x,
+            self.config.width,
+            ground_y=int(self.floor_y_for_player()),
+        )
+        self.dialogue.show(WIND_INTRO_TEXT)
+
+    def set_game_over(self, text: str = GAME_OVER_TEXT) -> None:
         if self.game_over:
             return
         self.game_over = True
@@ -340,7 +370,7 @@ class Game:
         self.player.movement_pressed = False
         self.player.start_animation("idle")
         self.thought_bubble.hide_immediately()
-        self.dialogue.show(GAME_OVER_TEXT, hint_text="Esc - kilépés")
+        self.dialogue.show(text, hint_text="Esc - kilépés")
 
     def update_cinematic_camera(self, dt: float) -> bool:
         if not self.cinematic_camera_active:
@@ -422,6 +452,14 @@ class Game:
             self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
             self._update_camera_y(dt)
             return
+        if self.wind_event_triggered and not self.wind_solved and not self.game_over:
+            # A szél-jelenetben középen tartjuk a farkast, hogy a jobbról érkező
+            # ágak időben látszódjanak.
+            target_camera_x = self.centered_camera_x_for_player()
+            smooth_factor = 1.0 - math.exp(-self.config.camera_smoothness * dt)
+            self.camera_x += (target_camera_x - self.camera_x) * smooth_factor
+            self._update_camera_y(dt)
+            return
         screen_x = self.player.world_x - self.camera_x
         target_camera_x = self.camera_x
         # JAVÍTÁS: a target a deadzone SZÉLÉN tartja a játékost, nem a center_x-en.
@@ -477,6 +515,8 @@ class Game:
         # Tó a ground UTÁN, hogy lefedje a vízfelszín alatti talajt.
         self.lake.draw(self.screen, self.camera_x)
         self.rolling_log.draw(self.screen, self.camera_x)
+        if self.wind_event_triggered:
+            self.wind.draw(self.screen, self.camera_x, self.camera_y)
         # Sziklacsúcs platformjai - a talaj előtt, de a játékos mögött
         self.peak.draw_platforms(self.screen, self.camera_x, self.camera_y)
         self.player.draw(self.screen, self.camera_x, self.camera_y)
@@ -584,6 +624,13 @@ class Game:
                       and self.player.world_x >= PEAK_CHALLENGE_WORLD_X):
                     self.trigger_peak_event()
 
+            if (not self.game_over
+                and self.constellation_phase == "done"
+                and not self.dialogue.active
+                and not self.wind_event_triggered
+                and self.player.world_x >= WIND_CHALLENGE_WORLD_X):
+                self.trigger_wind_event()
+
             blocked = self.movement_blocked()
             self.player.handle_input(dt, self.obstacle_left_edge(), self.controls_enabled(), blocked)
             # Bozót: gondolatfelhő ha próbálkozik mozogni.
@@ -609,6 +656,23 @@ class Game:
                 self.set_game_over()
             if self.rolling_log.solved:
                 self.log_solved = True
+            if self.wind_event_triggered and not self.wind_solved:
+                self.wind.update(
+                    dt,
+                    self.camera_x,
+                    self.config.width,
+                    self.player.world_x,
+                    paused=self.dialogue.active or self.game_over,
+                )
+
+                if not self.game_over and not self.dialogue.active:
+                    if self.wind.reached_cave(self.player.world_x):
+                        self.wind_solved = True
+                        self.wind.solve()
+                        self.dialogue.show(WIND_SUCCESS_TEXT)
+                    elif self.wind.collides_with_player(self.player):
+                        self.set_game_over(WIND_GAME_OVER_TEXT)
+
             self.dark_challenge.update(dt)
             if self.dark_challenge.active and not self.dark_challenge.solved:
                 self.thought_bubble.show(DARKNESS_HINT_TEXT)
