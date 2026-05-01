@@ -126,55 +126,61 @@ class RockyPeak:
         self.stars = self._build_stars_data()
 
     def _generate_layout(self, scale: float, target_climb_height: int):
-        """Procedurálisan generál egy variált felfelé vezető útvonalat (deterministic).
+        """Procedurálisan generál egy variált, nehezebb felfelé vezető útvonalat.
 
-        A blokkok jellemzően átfedik egymást vízszintesen (h_offset < block_w),
-        így a játékos egyszerű "felugrás egyenesen" technikával is feljebb juthat.
-        Időnként nagyobb oldalsó eltolások (kis átfedés) levegő-irányítást
-        igényelnek, ami változatossá teszi a mászást.
-
-        Visszaadja: ((rel_x, height_above_ground, width), ...), total_height
+        A blokkok között nagyobbak az X tengely menti távolságok,
+        ezért több levegő-irányítás és pontosabb ugrás szükséges.
         """
         rng = random.Random(20260)
+
         block_w = max(78, int(PEAK_BLOCK_WIDTH_BASE * scale))
         v_step_avg = max(58, int(70 * scale))
         num_steps = max(30, target_climb_height // v_step_avg)
-        # A vízszintes "pszeudo-középvonal" - a kockák ekörül cikkcakkolnak.
+
         rel_x = 0
         height_above = max(50, int(56 * scale))
         sign = 1
+
         layout: list[tuple[int, int, int]] = []
+
         for i in range(num_steps):
             layout.append((rel_x, height_above, block_w))
-            # Függőleges lépés: enyhe variancia, hogy ne legyen mechanikus.
+
+            # Függőleges lépés: maradhat hasonló, hogy ne legyen túl brutális egyszerre.
             v_step = rng.randint(int(v_step_avg * 0.85), int(v_step_avg * 1.18))
             height_above += v_step
-            # Vízszintes minta-választás: 4-féle közül.
+
             roll = rng.random()
-            if roll < 0.32:
-                # Közvetlen átfedés - majdnem teljesen függőleges felugrás.
-                h_offset = rng.randint(-int(22 * scale), int(22 * scale))
-            elif roll < 0.58:
-                # Kis oldalra-csúszás (jó átfedés).
-                h_offset = int(rng.randint(28, 50) * scale) * sign
+
+            if roll < 0.18:
+                # Ritkább közvetlen átfedés.
+                h_offset = rng.randint(-int(35 * scale), int(35 * scale))
+
+            elif roll < 0.42:
+                # Közepes oldalra-ugrás.
+                h_offset = int(rng.randint(85, 130) * scale) * sign
                 sign *= -1
-            elif roll < 0.84:
-                # Mérsékelt oldalra-lépés (kisebb átfedés).
-                h_offset = int(rng.randint(50, 75) * scale) * sign
+
+            elif roll < 0.75:
+                # Nagy oldalra-ugrás.
+                h_offset = int(rng.randint(130, 190) * scale) * sign
                 sign *= -1
+
             else:
-                # Nagyobb oldal-ugrás - levegő-irányítás kell, kis vagy nincs átfedés.
-                h_offset = int(rng.randint(75, 95) * scale) * sign
+                # Nagyon nagy oldalra-ugrás.
+                h_offset = int(rng.randint(190, 260) * scale) * sign
                 sign *= -1
+
             rel_x += h_offset
-            # Tartsuk a vízszintes drift-et viszonylag korlátok közt, hogy a
-            # sziluett mögötte mindig kompozícióban maradjon.
-            if rel_x > int(550 * scale):
-                rel_x = int(540 * scale)
+
+            # Nagyobb vízszintes mozgást engedünk.
+            if rel_x > int(900 * scale):
+                rel_x = int(880 * scale)
                 sign = -1
-            elif rel_x < int(-450 * scale):
-                rel_x = int(-440 * scale)
+            elif rel_x < int(-900 * scale):
+                rel_x = int(-880 * scale)
                 sign = 1
+
         return layout, height_above
 
     def _build_silhouette(self) -> pygame.Surface:

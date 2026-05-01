@@ -1,3 +1,5 @@
 /dist
 /build
 /temp
+scenes/__pycache__/
+/__pycache__

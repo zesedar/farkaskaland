@@ -283,7 +283,7 @@ class Player:
                 # ~18%-kal nagyobb mint a normál SPRITE_HEIGHT, hogy a farkas
                 # a talajon üljön és ne a levegőben (a kép aljának üres
                 # tartománya így lefelé tolódik a talajszint alá).
-                self.sitting_frame = load_frame_file(sitting_path, int(SPRITE_HEIGHT * 1.28))
+                self.sitting_frame = load_frame_file(sitting_path, int(SPRITE_HEIGHT * 1.12))
             except Exception:
                 self.sitting_frame = self.stop_frames[-1]
         else:
