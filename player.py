@@ -17,6 +17,13 @@ from constants import (
     GRAVITY,
     GREEN_ALPHA_DOMINANCE,
     GREEN_ALPHA_MIN_GREEN,
+    HOWL_DURATION,
+    HOWL_FOLDER_NAME,
+    HOWL_FRAME_COUNT,
+    HOWL_FRAME_PREFIX,
+    HOWL_FRAME_TIME,
+    HOWL_SOUND_FILENAME,
+    HOWL_SOUND_VOLUME,
     JUMP_ASCEND_FRAME_TIME,
     JUMP_DESCEND_FRAME_TIMES,
     JUMP_SHEET_COLUMNS,
@@ -179,6 +186,27 @@ def load_image_sequence(folder: Path, prefix: str, extension: str, digits: int,
     return frames
 
 
+def load_transparent_image_sequence(folder: Path, prefix: str, extension: str,
+                                    frame_count: int, target_height: int) -> list[pygame.Surface]:
+    """Átlátszó hátterű, számozott képsorozat betöltése.
+
+    Az üvöltés képei a feladat szerint assets/uvolt/uvolt1.png ... uvolt5.png
+    neveken vannak, ezért itt nincs 0-val kitöltött sorszám. A teljesen
+    transzparens széleket levágjuk, hogy az animáció ne legyen túl kicsi, ha a
+    PNG-k nagyobb vászonra vannak mentve.
+    """
+    frames: list[pygame.Surface] = []
+    for file_number in range(1, frame_count + 1):
+        path = folder / f"{prefix}{file_number}{extension}"
+        if not path.exists():
+            continue
+        frame = pygame.image.load(str(path)).convert_alpha()
+        frame = remove_green_transparency(frame)
+        frame = trim_transparent_padding(frame, padding=6)
+        frames.append(scale_surface_to_height(frame, target_height))
+    return frames
+
+
 # ---------------------------------------------------------------------------
 # Animáció-segédek
 # ---------------------------------------------------------------------------
@@ -288,6 +316,40 @@ class Player:
                 self.sitting_frame = self.stop_frames[-1]
         else:
             self.sitting_frame = self.stop_frames[-1]
+
+        # Üvöltés animáció (A billentyű): assets/uvolt/uvolt1.png ... uvolt5.png.
+        # Ha a képek még nincsenek a helyükön, nem áll meg a játék: az idle frame
+        # marad biztonsági fallbackként.
+        howl_folder = asset_dir / HOWL_FOLDER_NAME
+        self.howl_frames = load_transparent_image_sequence(
+            howl_folder,
+            HOWL_FRAME_PREFIX,
+            FRAME_FILE_EXTENSION,
+            HOWL_FRAME_COUNT,
+            SPRITE_HEIGHT,
+        )
+        if not self.howl_frames:
+            self.howl_frames = [self.stop_frames[-1]]
+
+        # Üvöltés hang: elsődlegesen assets/uvolt/wolf_howl.wav, de elfogadjuk
+        # az assets/wolf_howl.wav helyet is, hogy fejlesztés közben rugalmas legyen.
+        self.howl_sound: pygame.mixer.Sound | None = None
+        self.howl_sound_channel: pygame.mixer.Channel | None = None
+        howl_sound_candidates = [
+            howl_folder / HOWL_SOUND_FILENAME,
+            asset_dir / HOWL_SOUND_FILENAME,
+        ]
+        howl_sound_path = next((path for path in howl_sound_candidates if path.exists()), None)
+        if howl_sound_path is not None:
+            try:
+                if pygame.mixer.get_init() is None:
+                    pygame.mixer.init()
+                self.howl_sound = pygame.mixer.Sound(str(howl_sound_path))
+                self.howl_sound.set_volume(HOWL_SOUND_VOLUME)
+            except pygame.error:
+                # Hangrendszer nélküli környezetben is fusson tovább a játék.
+                self.howl_sound = None
+
         self.world_x = float(self.config.left_frame_x + 140)
         self.y = float(self.config.ground_top_y)
         self.vx = 0.0
@@ -306,10 +368,31 @@ class Player:
         # az effektív mozgás blokkolva van). Erre figyelünk a thought bubble-höz.
         self.tried_to_move = False
 
+    def stop_howl_sound(self) -> None:
+        if self.howl_sound_channel is not None:
+            self.howl_sound_channel.stop()
+            self.howl_sound_channel = None
+
     def start_animation(self, state: str) -> None:
         if self.animation_state != state:
+            if self.animation_state == "howl" and state != "howl":
+                self.stop_howl_sound()
             self.animation_state = state
             self.animation_timer = 0.0
+
+    def start_howl(self) -> None:
+        """Egyszer, lassan lefutó üvöltés animáció indítása az A billentyűvel."""
+        if self.animation_state == "howl":
+            return
+        self.vx = 0.0
+        self.movement_pressed = False
+        self.was_movement_pressed = False
+        self.start_animation("howl")
+        if self.howl_sound is not None:
+            self.howl_sound_channel = self.howl_sound.play()
+
+    def is_howling(self) -> bool:
+        return self.animation_state == "howl"
 
     def set_jump_phase(self, phase: str) -> None:
         if self.jump_phase != phase:
@@ -319,9 +402,19 @@ class Player:
     def handle_input(self, dt: float, obstacle_left_edge: float | None,
                      controls_enabled: bool, movement_blocked: bool = False) -> None:
         keys = pygame.key.get_pressed()
-        raw_left = controls_enabled and (keys[pygame.K_LEFT] or keys[pygame.K_a])
-        raw_right = controls_enabled and (keys[pygame.K_RIGHT] or keys[pygame.K_d])
-        raw_jump = controls_enabled and (keys[pygame.K_SPACE] or keys[pygame.K_w] or keys[pygame.K_UP])
+
+        # Az A billentyű az üvöltésé, a vízszintes mozgás pedig csak a nyilakkal történik.
+        # Üvöltés közben a farkas helyben marad, amíg az animáció végig nem fut.
+        if self.is_howling():
+            self.tried_to_move = False
+            self.movement_pressed = False
+            self.vx = 0.0
+            self.jump_pressed_last_frame = False
+            return
+
+        raw_left = controls_enabled and keys[pygame.K_LEFT]
+        raw_right = controls_enabled and keys[pygame.K_RIGHT]
+        raw_jump = controls_enabled and (keys[pygame.K_SPACE] or keys[pygame.K_UP])
 
         # A "raw" szándék azt jelzi: a játékos PRÓBÁLT mozogni.
         # Ezt a Game használja a thought bubble triggerelésére.
@@ -383,6 +476,16 @@ class Player:
             self.y = new_y
 
     def update_animation(self, dt: float) -> None:
+        if self.animation_state == "howl":
+            self.vx = 0.0
+            self.movement_pressed = False
+            self.animation_timer += dt
+            howl_duration = max(HOWL_DURATION, len(self.howl_frames) * HOWL_FRAME_TIME)
+            if self.animation_timer >= howl_duration:
+                self.start_animation("idle")
+            self.was_movement_pressed = False
+            return
+
         # Az "ülő" állapot fix - nem váltunk át belőle automatikusan,
         # csak külső start_animation hívással lehet kilépni belőle.
         if self.animation_state == "sitting":
@@ -429,6 +532,9 @@ class Player:
     def current_image(self) -> pygame.Surface:
         if self.animation_state == "sitting":
             image = self.sitting_frame
+        elif self.animation_state == "howl":
+            frame_index = min(int(self.animation_timer / HOWL_FRAME_TIME), len(self.howl_frames) - 1)
+            image = self.howl_frames[frame_index]
         elif self.animation_state == "jump":
             image = self.current_jump_image()
         elif self.animation_state == "run":

@@ -34,6 +34,15 @@ FAST_STOP_FRAME_TIME = 0.002
 # Ülő frame (6. jelenet) - opcionális assets fájl
 SITTING_FRAME_FILENAME = "ulelorenez.png"
 
+# Üvöltés animáció + hang - assets/uvolt/uvolt1.png ... uvolt5.png és wolf_howl.wav
+HOWL_FOLDER_NAME = "uvolt"
+HOWL_FRAME_PREFIX = "uvolt"
+HOWL_FRAME_COUNT = 5
+HOWL_DURATION = 6.0
+HOWL_FRAME_TIME = HOWL_DURATION / HOWL_FRAME_COUNT
+HOWL_SOUND_FILENAME = "wolf_howl.wav"
+HOWL_SOUND_VOLUME = 0.85
+
 # --- Sprite-feldolgozás (zöld háttér transzparenciára cserélése) ---
 GREEN_ALPHA_MIN_GREEN = 70
 GREEN_ALPHA_DOMINANCE = 28

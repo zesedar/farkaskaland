@@ -274,7 +274,7 @@ class IntroMenuScreen:
             label_rect = label.get_rect(center=rect.center)
             screen.blit(label, label_rect)
 
-        hint_text = "↑/↓ vagy W/S: választás • Enter: elfogadás • Egér: kattintás"
+        hint_text = "↑/↓: választás • Enter: elfogadás • Egér: kattintás"
         hint_lines = wrap_text(hint_text, self.menu_small_font, panel_rect.width - pad_x * 2)
         hint_surfaces = [self.menu_small_font.render(line, True, (220, 227, 255)) for line in hint_lines]
         hint_line_gap = max(3, int(5 * menu_scale))
@@ -323,7 +323,7 @@ class IntroMenuScreen:
         paragraphs = [
             "Ez a játék egy holdfényes, mesés hangulatú 2D oldalnézetes kaland.",
             "A főmenüből elindítható a játék, megnyitható ez a névjegy, vagy kiléphetsz.",
-            "Irányítás játék közben: A/D vagy nyilak a mozgáshoz, Space/W/Fel az ugráshoz, Enter az üzenetek bezárásához.",
+            "Irányítás játék közben: nyilak a mozgáshoz, Space/Fel az ugráshoz, A az üvöltéshez, Enter az üzenetek bezárásához.",
             f"Zene: M billentyűvel kapcsolható ki vagy be. Jelenleg: {music_text}; állapot: {availability_text}.",
             "A dallam végtelenítve szól, ha az assets könyvtárban megtalálható a dallam.wav fájl.",
         ]

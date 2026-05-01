@@ -131,7 +131,7 @@ class Game:
         self.running = True
 
     def _build_help_overlay(self) -> None:
-        text = "Mozgás: A/D vagy ←/→    Ugrás: Space / W / ↑    M: zene ki/be    Enter: üzenet bezárása    Esc: kilépés"
+        text = "Mozgás: ←/→    Ugrás: Space / ↑    Üvöltés: A    M: zene ki/be    Enter: üzenet bezárása    Esc: kilépés"
         surface = self.debug_font.render(text, True, (226, 232, 255))
         bg = pygame.Surface((surface.get_width() + 22, surface.get_height() + 14), pygame.SRCALPHA)
         pygame.draw.rect(bg, (8, 12, 34, 110), bg.get_rect(), border_radius=14)
@@ -212,6 +212,7 @@ class Game:
             and not self.dialogue.active
             and not self.cinematic_camera_active
             and not self.log_camera_transition_active
+            and not self.player.is_howling()
             and not self.dark_challenge.blocks_controls()
             and not self.constellation.blocks_controls()
             and self.constellation_phase in ("idle", "done")
@@ -564,9 +565,9 @@ class Game:
                             else:
                                 self.running = False
                         elif self.state == "menu":
-                            if event.key in (pygame.K_UP, pygame.K_w):
+                            if event.key == pygame.K_UP:
                                 self.menu.move_selection(-1)
-                            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                            elif event.key == pygame.K_DOWN:
                                 self.menu.move_selection(1)
                             elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                                 self.activate_menu_option(self.menu.selected_index)
@@ -595,6 +596,8 @@ class Game:
                             self.running = False
                     elif event.key == pygame.K_m:
                         self.toggle_music()
+                    elif event.key == pygame.K_a and self.controls_enabled() and self.player.on_ground:
+                        self.player.start_howl()
                 elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
                     if self.dark_challenge.handle_event(event):
                         self.dark_solved = True
@@ -778,7 +781,7 @@ class Game:
             return  # Dialógus alatt sem ticeljen, sem ne csökkenjen.
 
         keys = pygame.key.get_pressed()
-        holding_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+        holding_right = keys[pygame.K_RIGHT]
         if holding_right and self.is_pressed_against_lake():
             self.lake_hold_timer = min(LAKE_HOLD_DURATION, self.lake_hold_timer + dt)
             if self.lake_hold_timer >= LAKE_HOLD_DURATION:
