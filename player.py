@@ -24,6 +24,7 @@ from constants import (
     HOWL_FRAME_TIME,
     HOWL_SOUND_FILENAME,
     HOWL_SOUND_VOLUME,
+    HOWL_SCALE,
     JUMP_ASCEND_FRAME_TIME,
     JUMP_DESCEND_FRAME_TIMES,
     JUMP_SHEET_COLUMNS,
@@ -326,7 +327,7 @@ class Player:
             HOWL_FRAME_PREFIX,
             FRAME_FILE_EXTENSION,
             HOWL_FRAME_COUNT,
-            SPRITE_HEIGHT,
+            max(1, int(SPRITE_HEIGHT * HOWL_SCALE)),
         )
         if not self.howl_frames:
             self.howl_frames = [self.stop_frames[-1]]

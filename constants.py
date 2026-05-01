@@ -38,10 +38,13 @@ SITTING_FRAME_FILENAME = "ulelorenez.png"
 HOWL_FOLDER_NAME = "uvolt"
 HOWL_FRAME_PREFIX = "uvolt"
 HOWL_FRAME_COUNT = 5
-HOWL_DURATION = 6.0
+HOWL_DURATION = 4.0
 HOWL_FRAME_TIME = HOWL_DURATION / HOWL_FRAME_COUNT
 HOWL_SOUND_FILENAME = "wolf_howl.wav"
-HOWL_SOUND_VOLUME = 0.85
+HOWL_SOUND_VOLUME = 0.65
+# Az üvöltés képei kicsit nagyobbak legyenek az alap futó/idle farkasnál,
+# hogy vizuálisan jobban passzoljanak.
+HOWL_SCALE = 1.07
 
 # --- Sprite-feldolgozás (zöld háttér transzparenciára cserélése) ---
 GREEN_ALPHA_MIN_GREEN = 70
